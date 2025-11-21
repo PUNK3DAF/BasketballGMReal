@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>BasketballGM 2D Game Visualizer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="ui">
+      <label
+        >Load `league.json`: <input type="file" id="fileInput" accept=".json"
+      /></label>
+      <div id="teamSelectors" style="display: none">
+        <label
+          >Home:
+          <select id="homeSelect"></select
+        ></label>
+        <label
+          >Away:
+          <select id="awaySelect"></select
+        ></label>
+        <button id="startBtn">Start Game</button>
+        <button id="pauseBtn">Pause</button>
+        <label
+          >Speed:
+          <input
+            id="speed"
+            type="range"
+            min="0.25"
+            max="3"
+            step="0.25"
+            value="1"
+        /></label>
+      </div>
+      <div id="scoreboard">
+        <span id="homeLabel">Home</span>
+        <span id="homeScore">0</span>
+        <span>-</span>
+        <span id="awayScore">0</span>
+        <span id="awayLabel">Away</span>
+      </div>
+      <div id="log"></div>
+    </div>
+
+    <canvas id="court" width="900" height="500"></canvas>
+
+    <script src="app.js"></script>
+  </body>
+</html>
