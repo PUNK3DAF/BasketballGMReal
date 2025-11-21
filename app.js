@@ -157,6 +157,9 @@ playInstrBtn.addEventListener("click", () => {
       away = teams[1];
     if (home && away) {
       startGame(home, away);
+      // make sure game isn't paused when starting replay
+      game.paused = false;
+      pauseBtn.textContent = "Pause";
       // immediately dispatch any events that should fire at the starting clock
       dispatchTimedInstructions();
     } else {
@@ -164,20 +167,27 @@ playInstrBtn.addEventListener("click", () => {
       instrPlaying = false;
     }
   } else {
-    // if already running, ensure dispatch gets called now
+    // if already running, ensure we unpause and dispatch
+    game.paused = false;
+    pauseBtn.textContent = "Pause";
+    // ensure anim loop is running
+    if (!animRequest) animLoop();
     dispatchTimedInstructions();
   }
 });
 
-pauseInstrBtn.addEventListener("click", () => {
-  instrPlaying = false;
-  if (instrTimer) {
-    clearTimeout(instrTimer);
-    instrTimer = null;
-  }
-  if (game) {
-    game.paused = true;
-    pauseBtn.textContent = "Resume";
+pauseBtn.addEventListener("click", () => {
+  if (!game) return;
+  game.paused = !game.paused;
+  pauseBtn.textContent = game.paused ? "Resume" : "Pause";
+  log(game.paused ? "Playback paused" : "Playback resumed");
+  if (!game.paused) {
+    // ensure animation loop restarts
+    if (!animRequest) animLoop();
+    // if replaying instructions by timeout, resume timed dispatches
+    if (instrPlaying && !instrTimer) {
+      dispatchTimedInstructions();
+    }
   }
 });
 
@@ -298,7 +308,7 @@ function startGame(home, away) {
     typeof r === "string" ? { name: r } : { ...r }
   );
 
-  // if preprocess provided playersGlobal with team tags, prefer those rosters
+  // prefer playersGlobal if it provides lineups
   try {
     const homeFromGlobal = (playersGlobal || [])
       .filter((p) => p.team === "home")
@@ -306,10 +316,8 @@ function startGame(home, away) {
     const awayFromGlobal = (playersGlobal || [])
       .filter((p) => p.team === "away")
       .map((p) => ({ name: p.name, rating: p.rating || 60 }));
-    if (homeFromGlobal.length >= 5 && (!home.roster || home.roster.length < 5))
-      home.roster = homeFromGlobal;
-    if (awayFromGlobal.length >= 5 && (!away.roster || away.roster.length < 5))
-      away.roster = awayFromGlobal;
+    if (homeFromGlobal.length >= 5) home.roster = homeFromGlobal;
+    if (awayFromGlobal.length >= 5) away.roster = awayFromGlobal;
   } catch (e) {}
 
   // startClock uses highest trigger time if present
@@ -319,31 +327,6 @@ function startGame(home, away) {
       ...instructions.map((e) => (e.triggerAt !== undefined ? e.triggerAt : -1))
     );
     if (maxTrigger > 0) startClock = maxTrigger;
-    // set offense by first instruction possession if available
-    const firstWithPoss = instructions.find(
-      (ev) =>
-        ev.type === "inbound" ||
-        ev.type === "pass" ||
-        ev.type === "rebound" ||
-        ev.type === "steal"
-    );
-    if (firstWithPoss) {
-      if (
-        firstWithPoss.type === "inbound" &&
-        firstWithPoss.to &&
-        firstWithPoss.to.team
-      )
-        gameOff = firstWithPoss.to.team;
-      else if (
-        firstWithPoss.type === "pass" &&
-        firstWithPoss.from &&
-        firstWithPoss.from.team
-      )
-        gameOff = firstWithPoss.from.team;
-      if (typeof gameOff !== "undefined") {
-        // will be applied to created game below
-      }
-    }
   }
 
   game = {
@@ -365,12 +348,7 @@ function startGame(home, away) {
       flightType: null,
     },
     players: [],
-    offense:
-      typeof gameOff !== "undefined"
-        ? gameOff
-        : Math.random() < 0.5
-        ? "home"
-        : "away",
+    offense: Math.random() < 0.5 ? "home" : "away",
     paused: false,
     speed: parseFloat(speedSlider.value) || 1,
     possessionTime: 24,
@@ -380,10 +358,10 @@ function startGame(home, away) {
     repositionTimer: 0.6,
   };
 
-  function chooseFive(roster, fallbackNamePrefix) {
+  function chooseFive(roster, prefix) {
     if (!roster || roster.length === 0) {
       return Array.from({ length: 5 }, (_, i) => ({
-        name: `${fallbackNamePrefix}${i + 1}`,
+        name: `${prefix}${i + 1}`,
         rating: 60,
       }));
     }
@@ -394,10 +372,7 @@ function startGame(home, away) {
       .slice(0, Math.min(5, sorted.length))
       .map((p) => ({ name: p.name, rating: p.rating || 60 }));
     while (five.length < 5)
-      five.push({
-        name: `${fallbackNamePrefix}Sub${five.length + 1}`,
-        rating: 55,
-      });
+      five.push({ name: `${prefix}Sub${five.length + 1}`, rating: 55 });
     return five;
   }
 
@@ -448,11 +423,19 @@ function startGame(home, away) {
   document.getElementById("homeScore").textContent = String(game.homeScore);
   document.getElementById("awayScore").textContent = String(game.awayScore);
 
-  log(`Game started (${modeSelect.value}) at ${formatClock(game.timeLeft)}.`);
+  log(
+    `Game started with rosters: Home[${game.players
+      .filter((p) => p.team === "home")
+      .map((p) => p.name)
+      .join(", ")}] Away[${game.players
+      .filter((p) => p.team === "away")
+      .map((p) => p.name)
+      .join(", ")}] at ${formatClock(game.timeLeft)}.`
+  );
 
   if (animRequest) cancelAnimationFrame(animRequest);
   game.lastUpdate = performance.now();
-  // ensure an initial formation for both teams
+  // initial formation
   setTeamAttackPositions(game.offense);
   animLoop();
 }
@@ -609,7 +592,6 @@ function prepareForNextInstruction() {
   if (!(timeToEvent > 0 && timeToEvent <= Math.max(APPROACH_THRESHOLD, 0.5)))
     return;
 
-  // determine offense team and special shooter
   let offenseTeam = null;
   let shooterName = null;
   if (ev.type === "inbound") offenseTeam = ev.to && ev.to.team;
@@ -628,7 +610,6 @@ function prepareForNextInstruction() {
   else if (ev.type === "outOfBounds" && ev.awardedTo)
     offenseTeam = ev.awardedTo.team;
 
-  // compute per-player targets but be conservative with timing/durations
   const centerY = canvas.height / 2;
   const midX = canvas.width / 2;
   const offsets = [-100, -40, 40, 100, 0];
@@ -638,12 +619,10 @@ function prepareForNextInstruction() {
     let targetY = p.ty ?? p.y;
 
     if (offenseTeam && p.team === offenseTeam) {
-      // shooter gets closer to scoring location if specified, others get spacing
       if (shooterName && p.name === shooterName) {
         const rimX = getOpponentBasketX(p.team);
         const isThree = ev.points === 3;
         const approach = isThree ? 180 : 100;
-        // stay inside court and inside offensive half (do not cross midline)
         const desiredX =
           p.team === "home"
             ? clamp(rimX - approach, midX + 20, canvas.width - 40)
@@ -655,7 +634,6 @@ function prepareForNextInstruction() {
           canvas.height - 40
         );
       } else {
-        // spacing positions around the shooter/rim but not on top of it
         const spacingX =
           p.team === "home"
             ? Math.round(midX + 80 + (idx - 2) * 24)
@@ -668,7 +646,6 @@ function prepareForNextInstruction() {
         );
       }
     } else if (offenseTeam) {
-      // defenders hold defensive positions (stay on own half and mark general spacing)
       const defendBaseX =
         p.team === "home" ? Math.round(midX - 80) : Math.round(midX + 80);
       targetX = clamp(defendBaseX + (idx - 2) * 18, 40, canvas.width - 40);
@@ -708,6 +685,11 @@ function prepareForNextInstruction() {
       setMoveTween(p, targetX, targetY, dur);
     }
   });
+  log(
+    `Preparing for event ${ev.type} @${formatClock(
+      ev.triggerAt
+    )} offense=${offenseTeam}${shooterName ? " shooter=" + shooterName : ""}`
+  );
 }
 
 // SIMPLE simulate fallback kept (not used for instruction mode)
@@ -813,12 +795,16 @@ function setMoveTween(p, tx, ty, duration) {
   const dx = tx - p.x;
   const dy = ty - p.y;
   const dist = Math.hypot(dx, dy);
-  // slower min speed so players don't teleport cross-court
   const durFromDist = dist / (PLAYER_BASE_SPEED * 0.9);
   const dur = Math.max(0.45, Math.min(duration || durFromDist || 0.45, 1.6));
   p.move = { sx: p.x, sy: p.y, tx: tx, ty: ty, tleft: dur, duration: dur };
   p.tx = tx;
   p.ty = ty;
+  log(
+    `MoveTween: ${p.name} -> (${Math.round(tx)},${Math.round(
+      ty
+    )}) dur=${dur.toFixed(2)}`
+  );
 }
 
 function finalizeSteal(thief, from) {
@@ -950,6 +936,12 @@ function setInboundAfterScore() {
 // instruction application (no auto-pass generation)
 function applyInstruction(ev, opts = {}) {
   if (!game) return;
+  log(
+    `Apply instruction: ${ev.type} ${ev.clock ? "@" + ev.clock : ""} ${
+      ev.shooter ? ev.shooter.name : ""
+    }`
+  );
+
   switch (ev.type) {
     case "setPositions":
       if (Array.isArray(ev.positions)) {
@@ -975,6 +967,7 @@ function applyInstruction(ev, opts = {}) {
           }
         });
       }
+      log("Positions set");
       break;
 
     case "inbound": {
@@ -995,6 +988,11 @@ function applyInstruction(ev, opts = {}) {
         game.ball.vy = (target.y - game.ball.y) / travel;
         game.ball.ttl = travel;
         game.ball.pendingArrival = { type: "inbound", handler };
+        game.ball.holder = null;
+        log(`Inbound to ${handler.name}`);
+        setTeamAttackPositions(handler.team);
+      } else {
+        log("Inbound handler not found");
       }
       break;
     }
@@ -1015,6 +1013,7 @@ function applyInstruction(ev, opts = {}) {
             p.move = null;
           } else setMoveTween(p, ev.x, ev.y, ev.duration || 0.45);
         }
+        log(`Move instruction: ${p.name} -> (${ev.x},${ev.y})`);
       }
       break;
     }
@@ -1023,7 +1022,6 @@ function applyInstruction(ev, opts = {}) {
       const pFrom = findPlayer(ev.from.team, ev.from.name);
       const pTo = findPlayer(ev.to.team, ev.to.name);
       if (pFrom && pTo) {
-        // clamp receiver tx/ty to court
         const margin = 40;
         const rx = clamp(pTo.tx || pTo.x, margin, canvas.width - margin);
         const ry = clamp(pTo.ty || pTo.y, margin, canvas.height - margin);
@@ -1039,7 +1037,10 @@ function applyInstruction(ev, opts = {}) {
         game.ball.ttl = travel;
         game.ball.pendingArrival = { type: "pass", to: pTo };
         game.ball.holder = null;
-      }
+        log(`${pFrom.name} passes to ${pTo.name}`);
+        // small proactive reposition
+        setTeamAttackPositions(game.offense);
+      } else log("Pass: players not found");
       break;
     }
 
@@ -1059,7 +1060,6 @@ function applyInstruction(ev, opts = {}) {
           40,
           canvas.height - 40
         );
-
         const dx = shootX - shooter.x,
           dy = shootY - shooter.y,
           dist = Math.hypot(dx, dy);
@@ -1077,7 +1077,6 @@ function applyInstruction(ev, opts = {}) {
         ) {
           setMoveTween(shooter, shootX, shootY, moveDur);
         }
-
         const travel = ev.travel || 0.7;
         const targetX = clamp(oppX, 40, canvas.width - 40);
         const targetY = getBasketY();
@@ -1096,21 +1095,22 @@ function applyInstruction(ev, opts = {}) {
         };
         game.ball.holder = null;
         log(
-          `${shooter.name} shoots (${ev.points}) at ${ev.clock} - ${
-            ev.made ? "made" : "missed"
-          }`
+          `${shooter.name} shoots (${ev.points}) ${ev.made ? "made" : "missed"}`
         );
-      }
+        setTeamAttackPositions(game.offense);
+      } else log("Shot: shooter not found");
       break;
     }
 
     case "freethrow": {
       const shooter = findPlayer(ev.shooter.team, ev.shooter.name);
-      if (shooter)
+      if (shooter) {
         performFreeThrow(shooter, !!ev.made, {
           next: ev.next,
           rebound: ev.rebound,
         });
+        log(`${shooter.name} free throw ${ev.made ? "made" : "missed"}`);
+      }
       break;
     }
 
@@ -1122,6 +1122,8 @@ function applyInstruction(ev, opts = {}) {
         game.offense = p.team;
         game.ball.x = p.x + (p.team === "home" ? 10 : -10);
         game.ball.y = p.y - 8;
+        log(`${p.name} rebounds`);
+        setTeamAttackPositions(game.offense);
       }
       break;
     }
@@ -1146,6 +1148,7 @@ function applyInstruction(ev, opts = {}) {
               from.y,
               Math.min(0.9, Math.max(0.3, d / STEAL_APPROACH_SPEED))
             );
+            log(`${thief.name} begins approach to steal from ${from.name}`);
           }
         }
       }
@@ -1241,13 +1244,13 @@ function applyInstruction(ev, opts = {}) {
           game.ball.holder = handler;
           game.offense = team;
         }, 850);
+        log(`Timeout called by ${team}`);
       }
-      log(`Timeout (${team})`);
       break;
     }
 
     case "offensiveFoul":
-      log("Offensive foul ignored (instruction)");
+      log("Offensive foul (ignored in visualization)");
       break;
 
     case "setScore":
@@ -1255,6 +1258,9 @@ function applyInstruction(ev, opts = {}) {
       game.awayScore = ev.away || 0;
       document.getElementById("homeScore").textContent = game.homeScore;
       document.getElementById("awayScore").textContent = game.awayScore;
+      log(
+        `Score set: ${game.home.name} ${game.homeScore} - ${game.awayScore} ${game.away.name}`
+      );
       break;
 
     default:
@@ -1611,10 +1617,10 @@ function setTeamAttackPositions(offenseTeam) {
   const centerY = canvas.height / 2;
   const midX = canvas.width / 2;
   const margin = 40;
-  const attackDepth = 120; // how far into offensive half
+  const attackDepth = 120;
   const yOffsets = [-100, -40, 40, 100, 0];
 
-  // compute canonical positions for offense (relative to midline toward opponent rim)
+  // precompute offense targets for spacing
   const offenseTargets = [];
   for (let i = 0; i < 5; i++) {
     const y = clamp(
@@ -1630,16 +1636,13 @@ function setTeamAttackPositions(offenseTeam) {
     let ty = p.ty ?? p.y;
 
     if (offenseTeam && p.team === offenseTeam) {
-      // put offense on attacking half but keep spacing (don't all crowd the rim)
       const rimX = getOpponentBasketX(p.team);
-      const toward = p.team === "home" ? -1 : 1; // home attacks right->left (rim at x=30), away left->right
+      const toward = p.team === "home" ? -1 : 1;
       const baseX = Math.round(midX + toward * attackDepth);
-      // stagger x slightly so not everyone stacks on same x
       const stagger = (idx - 2) * 30;
       tx = clamp(baseX + stagger, margin, canvas.width - margin);
       ty = offenseTargets[idx].offsetY;
     } else if (offenseTeam) {
-      // defenders: hold on defensive half and mark opposing spacing rather than chasing into the rim
       const defendBaseX =
         p.team === "home"
           ? Math.round(midX - attackDepth * 0.6)
@@ -1648,7 +1651,6 @@ function setTeamAttackPositions(offenseTeam) {
       tx = clamp(defendBaseX + stagger, margin, canvas.width - margin);
       ty = clamp(centerY + (idx - 2) * 24, margin, canvas.height - margin);
     } else {
-      // neutral: mild halfcourt positions
       tx = clamp(
         midX + (p.team === "home" ? -80 : 80) + (idx - 2) * 18,
         margin,
@@ -1657,7 +1659,6 @@ function setTeamAttackPositions(offenseTeam) {
       ty = clamp(centerY + (idx - 2) * 28, margin, canvas.height - margin);
     }
 
-    // only retarget if meaningfully different to avoid jitter
     if (Math.hypot((p.tx || p.x) - tx, (p.ty || p.y) - ty) > 10 || !p.move) {
       const dx = tx - p.x,
         dy = ty - p.y,
@@ -1669,4 +1670,5 @@ function setTeamAttackPositions(offenseTeam) {
       setMoveTween(p, tx, ty, travel);
     }
   });
+  log(`Formation set for offense=${offenseTeam}`);
 }
