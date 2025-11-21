@@ -514,64 +514,74 @@ function prepareForNextInstruction() {
   const ev = instructions[instrIndex];
   if (!ev || ev.triggerAt === undefined) return;
   const timeToEvent = game.timeLeft - ev.triggerAt;
-  if (timeToEvent > 0 && timeToEvent <= Math.max(APPROACH_THRESHOLD, 0.5)) {
-    // determine which team will be on offense for the upcoming event
-    let offenseTeam = null;
-    if (ev.type === "inbound") offenseTeam = ev.to && ev.to.team;
-    else if (
-      ev.type === "pass" ||
-      ev.type === "shot" ||
-      ev.type === "freethrow"
-    ) {
-      offenseTeam =
-        (ev.from && ev.from.team) ||
-        (ev.shooter && ev.shooter.team) ||
-        (ev.to && ev.to.team);
-    } else if (ev.type === "rebound") offenseTeam = ev.team;
-    else if (ev.type === "steal") offenseTeam = ev.to && ev.to.team;
-    else if (ev.type === "outOfBounds" && ev.awardedTo)
-      offenseTeam = ev.awardedTo.team;
+  if (!(timeToEvent > 0 && timeToEvent <= Math.max(APPROACH_THRESHOLD, 0.5)))
+    return;
 
-    // set target positions: offense moves into attack positions, defense marks them
-    const attackX = (team) => {
-      // X toward opponent basket but not right on top
-      const base = getOpponentBasketX(team);
-      const dir = team === "home" ? -1 : 1; // approach from own half toward basket
-      const offset = 120;
-      return base + dir * offset;
-    };
+  // figure which team will be on offense for the upcoming event
+  let offenseTeam = null;
+  if (ev.type === "inbound") offenseTeam = ev.to && ev.to.team;
+  else if (
+    ev.type === "pass" ||
+    ev.type === "shot" ||
+    ev.type === "freethrow"
+  ) {
+    offenseTeam =
+      (ev.from && ev.from.team) ||
+      (ev.shooter && ev.shooter.team) ||
+      (ev.to && ev.to.team);
+  } else if (ev.type === "rebound") offenseTeam = ev.team;
+  else if (ev.type === "steal") offenseTeam = ev.to && ev.to.team;
+  else if (ev.type === "outOfBounds" && ev.awardedTo)
+    offenseTeam = ev.awardedTo.team;
 
-    // assign basic spots for 5 players: stagger vertically around center
-    const centerY = canvas.height / 2;
-    const offsets = [-120, -40, 40, 120, 0];
-    game.players.forEach((p, idx) => {
-      const target = { x: p.tx, y: p.ty };
-      if (offenseTeam && p.team === offenseTeam) {
-        // offense: move toward attackX and spaced vertically
-        const idxSpot = offsets[idx % offsets.length];
-        target.x = attackX(p.team);
-        target.y = centerY + idxSpot + idx * 6;
-      } else if (offenseTeam) {
-        // defense: mark opponent positions (mirror offense spacing)
-        const mirrorX =
-          getOpponentBasketX(p.team) + (p.team === "home" ? -80 : 80);
-        const idxSpot = offsets[idx % offsets.length];
-        target.x = mirrorX;
-        target.y = centerY + idxSpot + idx * -6;
-      } else {
-        // no clear offense: mild reposition to halfcourt triangles
-        target.x = canvas.width / 2 + (p.team === "home" ? -80 : 80);
-        target.y = centerY + offsets[idx % offsets.length];
-      }
-      // duration scales with distance and timeToEvent (give them enough time)
+  const offsetAttack = 120;
+  const guardOffset = 80;
+  const centerY = canvas.height / 2;
+  const offsets = [-120, -40, 40, 120, 0];
+
+  // helper: own basket x
+  const ownBasketX = (team) => (team === "home" ? 30 : canvas.width - 30);
+  const oppBasketX = (team) => getOpponentBasketX(team);
+
+  game.players.forEach((p, idx) => {
+    // compute desired target
+    const target = { x: p.tx, y: p.ty };
+    if (offenseTeam && p.team === offenseTeam) {
+      // offense: move toward opponent basket (attacking side) but not on top of rim
+      const dirSign = p.team === "home" ? -1 : 1;
+      target.x = oppBasketX(p.team) + dirSign * -offsetAttack;
+      target.y = centerY + offsets[idx % offsets.length] + idx * 6;
+    } else if (offenseTeam) {
+      // defense: position near own basket to guard it (don't go to opponent half)
+      target.x =
+        ownBasketX(p.team) + (p.team === "home" ? guardOffset : -guardOffset);
+      target.y = centerY + offsets[idx % offsets.length] + idx * -6;
+    } else {
+      // no clear offense: mild halfcourt setup
+      target.x = canvas.width / 2 + (p.team === "home" ? -80 : 80);
+      target.y = centerY + offsets[idx % offsets.length];
+    }
+
+    // Only set a new tween if not already moving toward roughly the same spot,
+    // or if current move is nearly finished (prevents overwrite every frame).
+    const targetDelta = Math.hypot(
+      (p.tx || p.x) - target.x,
+      (p.ty || p.y) - target.y
+    );
+    const needReset =
+      !p.move || targetDelta > 18 || (p.move && p.move.tleft < 0.12);
+
+    if (needReset) {
+      // duration scaled by distance and available time; ensure sensible min/max
       const dx = target.x - p.x;
       const dy = target.y - p.y;
       const dist = Math.hypot(dx, dy);
-      const desiredTime = Math.max(0.35, Math.min(1.4, timeToEvent * 0.9));
-      const dur = Math.max(0.25, Math.min(desiredTime, dist / 220));
+      const maxDur = Math.max(0.35, timeToEvent * 0.9);
+      const speed = PLAYER_BASE_SPEED * 1.8;
+      const dur = Math.max(0.18, Math.min(maxDur, dist / speed));
       setMoveTween(p, target.x, target.y, dur);
-    });
-  }
+    }
+  });
 }
 
 // SIMPLE simulate fallback kept (not used for instruction mode)
@@ -906,33 +916,52 @@ function applyInstruction(ev, opts = {}) {
     case "shot": {
       const shooter = findPlayer(ev.shooter.team, ev.shooter.name);
       if (shooter) {
-        // pick a shooting X on the attacking side (closer to opponent basket)
-        const basketX = getOpponentBasketX(shooter.team);
+        // compute an attacking spot on the shooter's attacking half (never shoot from own half)
+        const oppX = getOpponentBasketX(shooter.team);
+        const midX = canvas.width / 2;
         const isThree = ev.points === 3;
-        // 3pt further back, 2pt closer
         const shootOffset = isThree ? 200 : 110;
-        const shootX =
-          shooter.team === "home"
-            ? Math.min(basketX - 40, basketX - shootOffset)
-            : Math.max(basketX + 40, basketX + shootOffset);
+
+        // ensure shooter is on the attacking half: for home attacking half is right (>midX), away is left (<midX)
+        let shootX;
+        if (shooter.team === "home") {
+          shootX = Math.min(oppX - 40, Math.max(midX + 40, oppX - shootOffset));
+        } else {
+          shootX = Math.max(oppX + 40, Math.min(midX - 40, oppX + shootOffset));
+        }
         const shootY = canvas.height / 2 + (Math.random() * 80 - 40);
-        // move shooter into shooting spot quickly (duration based on time to event)
+
+        // only set a move if shooter isn't already moving toward that spot
+        const distToSpot = Math.hypot(shooter.x - shootX, shooter.y - shootY);
         const timeToEvent = game.timeLeft - ev.triggerAt;
         const moveDur = Math.max(
           0.18,
           Math.min(
             0.9,
-            timeToEvent > 0 ? Math.max(0.25, timeToEvent * 0.6) : 0.35
+            timeToEvent > 0 ? Math.max(0.22, timeToEvent * 0.6) : 0.35
           )
         );
-        setMoveTween(shooter, shootX, shootY, moveDur);
-        // schedule ball flight after a short delay (evtDelay controls)
+        if (
+          !shooter.move ||
+          Math.hypot(shooter.tx - shootX, shooter.ty - shootY) > 12
+        ) {
+          setMoveTween(
+            shooter,
+            shootX,
+            shootY,
+            Math.min(
+              moveDur,
+              Math.max(0.18, distToSpot / (PLAYER_BASE_SPEED * 1.6))
+            )
+          );
+        }
+
+        // start shot flight (flight originates from current shooter pos; small delay is acceptable)
         const travel = ev.travel || 0.7;
-        game.ball.state = "flying";
-        game.ball.flightType = "shot";
-        // compute vx/vy from shooter current pos (will be updated next frame) to basket
         const targetX = getOpponentBasketX(shooter.team);
         const targetY = getBasketY();
+        game.ball.state = "flying";
+        game.ball.flightType = "shot";
         game.ball.vx = (targetX - shooter.x) / travel;
         game.ball.vy = (targetY - shooter.y) / travel;
         game.ball.ttl = travel;
@@ -942,6 +971,7 @@ function applyInstruction(ev, opts = {}) {
           made: !!ev.made,
           points: ev.points,
           assist: ev.assist,
+          andOne: !!ev.andOne,
         };
         game.ball.holder = null;
         log(
