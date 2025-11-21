@@ -33,7 +33,12 @@ const THREE_PT_DIST = 220;
 
 const DEBUG_LOG = false;
 function logDebug(s) {
-  if (DEBUG_LOG) log(s);
+  if (DEBUG_LOG) {
+    // don't spam the UI; use console for debug-only output
+    try {
+      console.debug("[DEBUG]", s);
+    } catch (e) {}
+  }
 }
 
 // approach/anticipation
@@ -230,10 +235,32 @@ modeSelect.addEventListener("change", () => {
   if (mode === "replay") teamSelectors.style.display = "";
 });
 
-function log(s) {
-  const p = document.createElement("div");
-  p.textContent = s;
-  logEl.prepend(p);
+function log(msg) {
+  if (!logEl) return;
+  // simple dedupe + cap
+  log._last = log._last || { text: null, count: 0 };
+  log._max = log._max || 200;
+
+  if (msg === log._last.text) {
+    log._last.count++;
+    // update the most recent DOM entry (first child)
+    const first = logEl.firstChild;
+    if (first)
+      first.textContent = `${log._last.text} (x${log._last.count + 1})`;
+    // stop adding after many repeats
+    if (log._last.count > 20) return;
+    return;
+  }
+
+  // new message
+  log._last.text = msg;
+  log._last.count = 0;
+  const d = document.createElement("div");
+  d.textContent = msg;
+  logEl.prepend(d);
+
+  // trim old messages
+  while (logEl.children.length > log._max) logEl.removeChild(logEl.lastChild);
 }
 
 // --- parse league and roster ---
@@ -946,12 +973,13 @@ function setInboundAfterScore() {
 
 // instruction application (no auto-pass generation)
 function applyInstruction(ev, opts = {}) {
-  if (!game) return;
-  log(
-    `Apply instruction: ${ev.type} ${ev.clock ? "@" + ev.clock : ""} ${
-      ev.shooter ? ev.shooter.name : ""
-    }`
-  );
+  if (!game || !ev) return;
+
+  // Only write a concise, user-facing log for important events.
+  function note(s) {
+    if (!opts.silent) log(s);
+    logDebug(`instr:${ev.type} -> ${s}`);
+  }
 
   switch (ev.type) {
     case "setPositions":
@@ -978,7 +1006,7 @@ function applyInstruction(ev, opts = {}) {
           }
         });
       }
-      log("Positions set");
+      note("Positions applied");
       break;
 
     case "inbound": {
@@ -1000,10 +1028,10 @@ function applyInstruction(ev, opts = {}) {
         game.ball.ttl = travel;
         game.ball.pendingArrival = { type: "inbound", handler };
         game.ball.holder = null;
-        log(`Inbound to ${handler.name}`);
+        note(`Inbound to ${handler.name}`);
         setTeamAttackPositions(handler.team);
       } else {
-        log("Inbound handler not found");
+        note("Inbound (handler not found)");
       }
       break;
     }
@@ -1024,7 +1052,7 @@ function applyInstruction(ev, opts = {}) {
             p.move = null;
           } else setMoveTween(p, ev.x, ev.y, ev.duration || 0.45);
         }
-        log(`Move instruction: ${p.name} -> (${ev.x},${ev.y})`);
+        note(`Move: ${p.name}`);
       }
       break;
     }
@@ -1048,10 +1076,11 @@ function applyInstruction(ev, opts = {}) {
         game.ball.ttl = travel;
         game.ball.pendingArrival = { type: "pass", to: pTo };
         game.ball.holder = null;
-        log(`${pFrom.name} passes to ${pTo.name}`);
-        // small proactive reposition
+        note(`${pFrom.name} → ${pTo.name}`);
         setTeamAttackPositions(game.offense);
-      } else log("Pass: players not found");
+      } else {
+        note("Pass: player(s) missing");
+      }
       break;
     }
 
@@ -1105,11 +1134,13 @@ function applyInstruction(ev, opts = {}) {
           andOne: !!ev.andOne,
         };
         game.ball.holder = null;
-        log(
+        note(
           `${shooter.name} shoots (${ev.points}) ${ev.made ? "made" : "missed"}`
         );
         setTeamAttackPositions(game.offense);
-      } else log("Shot: shooter not found");
+      } else {
+        note("Shot: shooter not found");
+      }
       break;
     }
 
@@ -1120,7 +1151,7 @@ function applyInstruction(ev, opts = {}) {
           next: ev.next,
           rebound: ev.rebound,
         });
-        log(`${shooter.name} free throw ${ev.made ? "made" : "missed"}`);
+        note(`FT: ${shooter.name} ${ev.made ? "made" : "missed"}`);
       }
       break;
     }
@@ -1133,7 +1164,7 @@ function applyInstruction(ev, opts = {}) {
         game.offense = p.team;
         game.ball.x = p.x + (p.team === "home" ? 10 : -10);
         game.ball.y = p.y - 8;
-        log(`${p.name} rebounds`);
+        note(`${p.name} rebound`);
         setTeamAttackPositions(game.offense);
       }
       break;
@@ -1144,8 +1175,10 @@ function applyInstruction(ev, opts = {}) {
       const from = findPlayer(ev.from.team, ev.from.name);
       if (thief && from) {
         const d = Math.hypot(thief.x - from.x, thief.y - from.y);
-        if (d <= STEAL_RADIUS) finalizeSteal(thief, from);
-        else {
+        if (d <= STEAL_RADIUS) {
+          finalizeSteal(thief, from);
+          note(`${thief.name} stole from ${from.name}`);
+        } else {
           game.pendingSteals = game.pendingSteals || [];
           if (
             !game.pendingSteals.find(
@@ -1159,7 +1192,7 @@ function applyInstruction(ev, opts = {}) {
               from.y,
               Math.min(0.9, Math.max(0.3, d / STEAL_APPROACH_SPEED))
             );
-            log(`${thief.name} begins approach to steal from ${from.name}`);
+            note(`${thief.name} approaches to steal`);
           }
         }
       }
@@ -1194,7 +1227,7 @@ function applyInstruction(ev, opts = {}) {
           idleTimer: Math.random() * 1.5 + 0.2,
         };
         game.players[outIdx] = newP;
-        log(`Substitution: ${outName} out, ${inName} in (${ev.team})`);
+        note(`Sub: ${outName} → ${inName}`);
       }
       break;
     }
@@ -1223,7 +1256,7 @@ function applyInstruction(ev, opts = {}) {
           }, 120);
         }
       }
-      log("Ball out of bounds");
+      note("Out of bounds");
       break;
     }
 
@@ -1255,27 +1288,31 @@ function applyInstruction(ev, opts = {}) {
           game.ball.holder = handler;
           game.offense = team;
         }, 850);
-        log(`Timeout called by ${team}`);
+        note(`Timeout: ${team}`);
       }
       break;
     }
 
     case "offensiveFoul":
-      log("Offensive foul (ignored in visualization)");
+      // intentionally ignored in visualizer
+      note("Offensive foul (ignored)");
       break;
 
     case "setScore":
       game.homeScore = ev.home || 0;
       game.awayScore = ev.away || 0;
-      document.getElementById("homeScore").textContent = game.homeScore;
-      document.getElementById("awayScore").textContent = game.awayScore;
-      log(
-        `Score set: ${game.home.name} ${game.homeScore} - ${game.awayScore} ${game.away.name}`
+      const hs = document.getElementById("homeScore"),
+        as = document.getElementById("awayScore");
+      if (hs) hs.textContent = game.homeScore;
+      if (as) as.textContent = game.awayScore;
+      note(
+        `Score: ${game.home.name} ${game.homeScore} - ${game.awayScore} ${game.away.name}`
       );
       break;
 
     default:
-      console.warn("Unknown instruction type", ev);
+      // unknown instruction: keep silent in UI, but debug-print if enabled
+      logDebug(`Unknown instruction: ${JSON.stringify(ev)}`);
   }
 
   if (!opts.silent) render();
