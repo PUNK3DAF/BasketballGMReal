@@ -86,15 +86,77 @@ loadInstrBtn.addEventListener("click", async () => {
 });
 
 playInstrBtn.addEventListener("click", () => {
-  if (!instructions.length) {
+  if (!instructions || !instructions.length) {
     log("No instructions loaded.");
     return;
   }
+
   instrPlaying = true;
+
+  // ensure teams exist: if instructions included a lineup, preprocess may have populated playersGlobal
+  if (!teams || teams.length < 2) {
+    // try to build teams from playersGlobal (which preprocess may have filled)
+    const homeRoster = (playersGlobal || [])
+      .filter((p) => p.team === "home")
+      .map((p) => ({ name: p.name, rating: p.rating || 60 }));
+    const awayRoster = (playersGlobal || [])
+      .filter((p) => p.team === "away")
+      .map((p) => ({ name: p.name, rating: p.rating || 60 }));
+    if (homeRoster.length && awayRoster.length) {
+      teams = [
+        { id: "home", name: "Home", roster: homeRoster },
+        { id: "away", name: "Away", roster: awayRoster },
+      ];
+      populateTeamSelectors();
+      log("Built teams from instruction lineups.");
+    }
+  }
+
+  // fallback: if still no teams, create minimal dummy teams so startGame can run
+  if (!teams || teams.length < 2) {
+    teams = [
+      {
+        id: "home",
+        name: "Home",
+        roster: [
+          { name: "P1" },
+          { name: "P2" },
+          { name: "P3" },
+          { name: "P4" },
+          { name: "P5" },
+        ],
+      },
+      {
+        id: "away",
+        name: "Away",
+        roster: [
+          { name: "Q1" },
+          { name: "Q2" },
+          { name: "Q3" },
+          { name: "Q4" },
+          { name: "Q5" },
+        ],
+      },
+    ];
+    populateTeamSelectors();
+    log("Created fallback teams to start the replay.");
+  }
+
+  // start game if needed
   if (!game) {
     const home = teams[0],
       away = teams[1];
-    if (home && away) startGame(home, away);
+    if (home && away) {
+      startGame(home, away);
+      // immediately dispatch any events that should fire at the starting clock
+      dispatchTimedInstructions();
+    } else {
+      log("Cannot start game: teams missing.");
+      instrPlaying = false;
+    }
+  } else {
+    // if already running, ensure dispatch gets called now
+    dispatchTimedInstructions();
   }
 });
 
