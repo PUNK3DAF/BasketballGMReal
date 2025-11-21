@@ -1,4 +1,5 @@
 // BasketballGM 2D visualizer - realism fixes (shot-clock, steals/intercepts, pacing)
+// + fix: offense moves into opponent half and inbound targets handler's attack position
 const fileInput = document.getElementById("fileInput");
 const homeSelect = document.getElementById("homeSelect");
 const awaySelect = document.getElementById("awaySelect");
@@ -235,10 +236,10 @@ function animLoop(t) {
 
 // --- game logic with state machine ---
 // Fixes:
-// - shot clock only decremented during active play (not during inbound setup)
-// - interceptions restricted to defenders near the pass line
-// - steals only when defenders are nearby
-// - slower, more realistic pacing
+// - offense moves into attacking half (baseX changed)
+// - inbound sends ball to handler's intended attack position (handler.tx/ty)
+// - shot clock only decremented during active play (not inbound)
+// - interceptions/steals restricted to nearby defenders
 function stepGame(dt) {
   // advance game clock
   game.timeLeft -= dt;
@@ -304,7 +305,6 @@ function stepGame(dt) {
           // set next play to dribble with the receiver as handler
           if (game.currentPlay) {
             game.currentPlay.handler = receiver;
-            // small buffer before deciding again
             game.currentPlay.minDribble = 0.6 + Math.random() * 1.2;
             game.currentPlay.phase = "dribble";
             game.currentPlay.phaseStart = performance.now();
@@ -398,11 +398,8 @@ function stepGame(dt) {
     if (elapsed > cp.duration) {
       cp.phase = "dribble";
       cp.phaseStart = performance.now();
-      // move handler toward attack area
-      cp.handler.tx =
-        canvas.width / 2 + (cp.handler.team === "home" ? -120 : 120);
-      cp.handler.ty = canvas.height / 2;
-      // ensure ball attaches to handler when inbound arrival handles it
+      // move handler toward attack area (handler.tx already set by startPossession)
+      // ball will be attached when inbound arrival finalizes
     }
   } else if (cp.phase === "dribble") {
     if (elapsed > (cp.minDribble || 0.9)) {
@@ -435,7 +432,6 @@ function stepGame(dt) {
           )
         : -1;
       const choiceRand = Math.random();
-      // More likely to pass than shoot; shooting reserved for good situations
       if (choiceRand < 0.22 + Math.max(0, 0.35 * passScore)) {
         const target = weightedChoice(
           teammates,
@@ -447,12 +443,10 @@ function stepGame(dt) {
           cp.phaseStart = performance.now();
         }
       } else if (choiceRand < 0.28 + Math.max(0, 0.5 * shotScore)) {
-        // shoot only when reasonably attractive
         initiateShot(handler);
         cp.phase = "shoot";
         cp.phaseStart = performance.now();
       } else {
-        // continue dribbling
         cp.minDribble = 0.9 + Math.random() * 2.2;
         cp.phaseStart = performance.now();
         handler.tx = Math.max(
@@ -463,7 +457,6 @@ function stepGame(dt) {
           60,
           Math.min(canvas.height - 60, handler.y + (Math.random() * 120 - 60))
         );
-        // small turnover chance only if defenders very close
         const nearestDef = findNearestDefender(handler);
         const defDist = nearestDef
           ? Math.hypot(nearestDef.x - handler.x, nearestDef.y - handler.y)
@@ -478,15 +471,7 @@ function stepGame(dt) {
       }
     }
   } else if (cp.phase === "pass") {
-    // nothing to do here; pass interception handled in initiatePass flight
-    if (
-      game.ball.state === "held" &&
-      game.ball.holder &&
-      game.ball.holder.team === cp.handler.team &&
-      game.ball.holder !== cp.handler
-    ) {
-      // arrived to teammate; already switched to dribble earlier
-    }
+    // pass flight handles arrival/interception
   } else if (cp.phase === "shoot") {
     // waiting for shot flight resolution
   }
@@ -513,6 +498,9 @@ function startPossession() {
   const offensePlayers = game.players.filter((p) => p.team === offenseTeam);
   const handler = weightedChoice(offensePlayers, (p) => p.rating + 10);
   if (!handler) return;
+
+  // choose attacking X so offense is placed on opponent half
+  const attackBaseX = offenseTeam === "home" ? canvas.width - 160 : 160; // attack toward opponent basket
   game.currentPlay = {
     phase: "inbound",
     handler,
@@ -522,24 +510,29 @@ function startPossession() {
   };
   // set shot clock full on new possession
   game.possessionTime = 24;
-  // position offensive and defensive shapes
-  const baseX = offenseTeam === "home" ? 160 : canvas.width - 160;
+
+  // position offensive and defensive shapes (offense on attacking half)
   const spreadY = [-80, -40, 0, 40, 80];
   const offPlayers = game.players.filter((p) => p.team === offenseTeam);
   offPlayers.forEach((p, i) => {
-    p.tx = baseX + (Math.random() * 40 - 20);
+    p.tx = attackBaseX + (Math.random() * 40 - 20);
     p.ty = canvas.height / 2 + spreadY[i] + (Math.random() * 30 - 15);
   });
   const defPlayers = game.players.filter((p) => p.team !== offenseTeam);
+  // defenders positioned more toward their own basket (defending)
+  const defBaseX = offenseTeam === "home" ? 120 : canvas.width - 120;
   defPlayers.forEach((p, i) => {
-    p.tx = canvas.width - baseX + (Math.random() * 40 - 20);
+    p.tx = defBaseX + (Math.random() * 40 - 20);
     p.ty = canvas.height / 2 + spreadY[i] + (Math.random() * 30 - 15);
   });
-  // visual inbound flight from center to handler
+
+  // inbound target should be the handler's intended attack position (handler.tx/ty)
+  const inboundTarget = { x: handler.tx, y: handler.ty };
+  // visual inbound flight from center to handler's attack spot
   game.ball.state = "flying";
   game.ball.flightType = "inbound";
-  const inboundTarget = { x: handler.x, y: handler.y };
   const travel = 0.55;
+  // move ball from center to inboundTarget
   game.ball.vx = (inboundTarget.x - game.ball.x) / travel;
   game.ball.vy = (inboundTarget.y - game.ball.y) / travel;
   game.ball.ttl = travel;
@@ -549,29 +542,23 @@ function startPossession() {
 function initiatePass(from, to) {
   const travel =
     0.28 + Math.min(1.0, Math.hypot(from.x - to.x, from.y - to.y) / 420);
-  // compute possible interceptors near pass midpoint
   const midX = (from.x + to.x) / 2,
     midY = (from.y + to.y) / 2;
   const defenders = game.players.filter((p) => p.team !== from.team);
-  // restrict to defenders reasonably close to the pass line
   const interceptors = defenders.filter(
     (d) => Math.hypot(d.x - midX, d.y - midY) < 140
   );
-  // if there are interceptors, let each have a chance proportional to proximity & rating
   if (interceptors.length) {
-    // sort by proximity (closer more likely)
     interceptors.sort(
       (a, b) =>
         Math.hypot(a.x - midX, a.y - midY) - Math.hypot(b.x - midX, b.y - midY)
     );
     for (let d of interceptors) {
       const dDist = Math.hypot(d.x - midX, d.y - midY);
-      // closer => higher chance; rating helps
       const base = 0.06 + Math.max(0, (140 - dDist) / 800);
       const rated = base + (d.rating - 60) / 600;
       const chance = Math.min(0.5, Math.max(0.02, rated));
       if (Math.random() < chance) {
-        // interception succeed
         game.ball.state = "held";
         game.ball.holder = d;
         d.tx = d.x;
@@ -589,7 +576,6 @@ function initiatePass(from, to) {
       }
     }
   }
-  // no interceptor -> normal pass
   game.ball.state = "flying";
   game.ball.flightType = "pass";
   game.ball.ttl = travel;
@@ -616,7 +602,6 @@ function initiateShot(shooter) {
 }
 
 function handleTurnover(handler) {
-  // only allow steals from defenders reasonably close
   const defenders = game.players.filter((p) => p.team !== handler.team);
   const nearby = defenders.filter(
     (d) => Math.hypot(d.x - handler.x, d.y - handler.y) < 100
@@ -643,7 +628,6 @@ function handleTurnover(handler) {
       return;
     }
   }
-  // fallback: turnover without a steal (change possession without thief)
   game.offense = game.offense === "home" ? "away" : "home";
   game.currentPlay = null;
 }
@@ -652,7 +636,6 @@ function setInboundAfterScore() {
   game.offense = game.offense === "home" ? "away" : "home";
   game.currentPlay = null;
   game.possessionTime = 24;
-  // center ball and wait for startPossession to inbound
   game.ball.state = "held";
   game.ball.holder = null;
   game.ball.x = canvas.width / 2;
