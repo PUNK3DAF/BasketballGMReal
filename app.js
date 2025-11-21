@@ -386,18 +386,20 @@ function startGame(home, away) {
 // animation loop: always update physics (players + ball)
 function animLoop(t) {
   if (!game) return;
+  animRequest = requestAnimationFrame(animLoop);
+
+  const now = performance.now();
+  const dtReal = (now - game.lastUpdate) / 1000;
+  game.lastUpdate = now;
+  if (game.paused) return;
+  const dt = dtReal * game.speed;
+
   // periodic team repositioning so players don't wait until the last second
   game.repositionTimer = (game.repositionTimer || 0) - dt;
   if (game.repositionTimer <= 0) {
     game.repositionTimer = 0.6; // call every ~0.6s
     setTeamAttackPositions(game.offense);
   }
-  animRequest = requestAnimationFrame(animLoop);
-  const now = performance.now();
-  const dtReal = (now - game.lastUpdate) / 1000;
-  game.lastUpdate = now;
-  if (game.paused) return;
-  const dt = dtReal * game.speed;
 
   // decrement game clock so timestamped events can trigger
   game.timeLeft = Math.max(0, game.timeLeft - dt);
