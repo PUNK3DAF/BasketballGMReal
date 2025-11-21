@@ -1,4 +1,4 @@
-// BasketballGM 2D visualizer - improved pacing and realism
+// BasketballGM 2D visualizer - realism fixes (shot-clock, steals/intercepts, pacing)
 const fileInput = document.getElementById("fileInput");
 const homeSelect = document.getElementById("homeSelect");
 const awaySelect = document.getElementById("awaySelect");
@@ -141,6 +141,7 @@ function startGame(home, away) {
       vx: 0,
       vy: 0,
       state: "held",
+      holder: null,
     },
     players: [],
     offense: Math.random() < 0.5 ? "home" : "away",
@@ -233,9 +234,13 @@ function animLoop(t) {
 }
 
 // --- game logic with state machine ---
-// NOTE: shot-clock fix — ensure new possession is initialized before decreasing shot clock
+// Fixes:
+// - shot clock only decremented during active play (not during inbound setup)
+// - interceptions restricted to defenders near the pass line
+// - steals only when defenders are nearby
+// - slower, more realistic pacing
 function stepGame(dt) {
-  // advance game clock first
+  // advance game clock
   game.timeLeft -= dt;
   if (game.timeLeft <= 0) {
     game.period++;
@@ -249,28 +254,29 @@ function stepGame(dt) {
     }
   }
 
-  // If there's no current play yet, start the possession and skip shot-clock decrement this frame
+  // if no play active, start a possession and skip shot-clock decrement for this frame
   if (!game.currentPlay) {
     startPossession();
     return;
   }
 
-  // Now decrement shot clock for an active possession
-  game.possessionTime -= dt;
+  // decrement shot clock only when not inbound (gives time to set up)
+  if (game.currentPlay.phase !== "inbound") {
+    game.possessionTime -= dt;
+  }
 
   // update players movement towards targets
   game.players.forEach((p) => {
     const dx = p.tx - p.x,
       dy = p.ty - p.y;
     const dist = Math.hypot(dx, dy);
-    const baseSpeed = 80; // px/s
-    const s = baseSpeed * (0.6 + p.rating / 150) * (p.energy / 120);
+    const baseSpeed = 72; // slightly reduced walking/dribble speed
+    const s = baseSpeed * (0.6 + (p.rating || 60) / 150) * (p.energy / 120);
     if (dist > 1) {
       p.x += (dx / dist) * s * dt;
       p.y += (dy / dist) * s * dt;
     }
-    // slow energy drain while moving
-    p.energy = Math.max(20, p.energy - dt * 0.5);
+    p.energy = Math.max(20, p.energy - dt * 0.35);
   });
 
   // handle ball physics if flying (pass/shot)
@@ -282,7 +288,7 @@ function stepGame(dt) {
       if (game.ball.ttl <= 0) {
         // arrival
         if (game.ball.flightType === "pass") {
-          // find receiving player (closest)
+          // find receiving player (closest to arrival)
           let receiver = findClosestPlayer(
             game.ball.x,
             game.ball.y,
@@ -296,7 +302,13 @@ function stepGame(dt) {
           game.ball.x = receiver.x + (receiver.team === "home" ? 10 : -10);
           game.ball.y = receiver.y - 8;
           // set next play to dribble with the receiver as handler
-          if (game.currentPlay) game.currentPlay.handler = receiver;
+          if (game.currentPlay) {
+            game.currentPlay.handler = receiver;
+            // small buffer before deciding again
+            game.currentPlay.minDribble = 0.6 + Math.random() * 1.2;
+            game.currentPlay.phase = "dribble";
+            game.currentPlay.phaseStart = performance.now();
+          }
         } else if (game.ball.flightType === "shot") {
           // shot arrival -> decide make/miss
           const shooter = game.ball.shooter;
@@ -304,9 +316,25 @@ function stepGame(dt) {
           game.ball.state = "ground";
           game.ball.vx = game.ball.vy = 0;
           // schedule rebound or inbound after short delay
-          game.ball.ttl = 0.4;
-          // attach outcome info
+          game.ball.ttl = 0.42;
           game.ball.lastShot = { shooter, made, points: game.ball.points || 2 };
+        } else if (game.ball.flightType === "inbound") {
+          // inbound arrival -> attach to handler (start dribble)
+          const handler = game.currentPlay && game.currentPlay.handler;
+          if (handler) {
+            game.ball.state = "held";
+            game.ball.holder = handler;
+            game.ball.x = handler.x + (handler.team === "home" ? 10 : -10);
+            game.ball.y = handler.y - 8;
+            if (game.currentPlay) {
+              game.currentPlay.phase = "dribble";
+              game.currentPlay.phaseStart = performance.now();
+            }
+          } else {
+            // fallback
+            game.ball.state = "held";
+            game.ball.holder = null;
+          }
         }
       }
     }
@@ -314,7 +342,6 @@ function stepGame(dt) {
     if (game.ball.ttl !== undefined) {
       game.ball.ttl -= dt;
       if (game.ball.ttl <= 0) {
-        // handle shot outcome
         if (game.ball.lastShot) {
           const sh = game.ball.lastShot;
           if (sh.made) {
@@ -325,30 +352,27 @@ function stepGame(dt) {
             log(
               `${sh.shooter.name} (${sh.shooter.team}) scored ${sh.points} — ${game.homeScore}-${game.awayScore}`
             );
-            // opponent inbounds after made basket
             setInboundAfterScore();
           } else {
             log(`${sh.shooter.name} (${sh.shooter.team}) missed`);
             // rebound contest
             const rebounder = chooseRebounder(sh.shooter);
             if (rebounder) {
-              // give the ball to rebounder and set possession accordingly
               game.ball.state = "held";
               game.ball.holder = rebounder;
               game.ball.x =
                 rebounder.x + (rebounder.team === "home" ? 10 : -10);
               game.ball.y = rebounder.y - 8;
-              // set offense to rebounder's team
               game.offense = rebounder.team;
               game.possessionTime = 24;
-              // set handler for next immediate dribble
               game.currentPlay = {
                 phase: "dribble",
                 handler: rebounder,
                 phaseStart: performance.now(),
+                minDribble: 0.6,
               };
             } else {
-              // safe fallback: alternate possession
+              // fallback: alternate possession
               game.offense = game.offense === "home" ? "away" : "home";
               game.possessionTime = 24;
               game.currentPlay = null;
@@ -360,29 +384,28 @@ function stepGame(dt) {
     }
   }
 
-  // handle current play phases
+  // if no active play (e.g., after inbound/rebound handling) then start possession
+  if (!game.currentPlay) {
+    startPossession();
+    return;
+  }
+
+  // handle play phases
   const cp = game.currentPlay;
   const elapsed = (performance.now() - cp.phaseStart) / 1000;
 
   if (cp.phase === "inbound") {
-    // short inbound animation then to dribble
     if (elapsed > cp.duration) {
       cp.phase = "dribble";
       cp.phaseStart = performance.now();
-      // handler moves into shape
+      // move handler toward attack area
       cp.handler.tx =
-        canvas.width / 2 + (cp.handler.team === "home" ? -100 : 100);
+        canvas.width / 2 + (cp.handler.team === "home" ? -120 : 120);
       cp.handler.ty = canvas.height / 2;
-      // attach ball to handler
-      game.ball.state = "held";
-      game.ball.holder = cp.handler;
-      game.ball.x = cp.handler.x + (cp.handler.team === "home" ? 10 : -10);
-      game.ball.y = cp.handler.y - 8;
+      // ensure ball attaches to handler when inbound arrival handles it
     }
   } else if (cp.phase === "dribble") {
-    // decide between dribble longer, pass, or shoot
-    if (elapsed > cp.minDribble) {
-      // evaluate options
+    if (elapsed > (cp.minDribble || 0.9)) {
       const handler = cp.handler;
       const teammates = game.players.filter(
         (p) => p.team === handler.team && p !== handler
@@ -395,77 +418,86 @@ function stepGame(dt) {
       const defenderPressure =
         defendersNearby.reduce((s, p) => s + (120 - p.rating), 0) /
         (defendersNearby.length || 1);
-      // shot attractiveness: rating, distance to hoop, low pressure
       const shotDist = Math.hypot(
-        getBasketX(handler.team) - handler.x,
+        getOpponentBasketX(handler.team) - handler.x,
         getBasketY() - handler.y
       );
+      // Favor passing and longer dribbles to reduce constant shooting
       const shotScore =
-        (handler.rating - 55) / 50 - shotDist / 500 - defenderPressure / 200;
-      const passScore = Math.max(
-        ...teammates.map(
-          (t) =>
-            (t.rating - 55) / 50 -
-            Math.hypot(handler.x - t.x, handler.y - t.y) / 400
-        )
-      );
-      // small random
+        (handler.rating - 55) / 60 - shotDist / 700 - defenderPressure / 240;
+      const passScore = teammates.length
+        ? Math.max(
+            ...teammates.map(
+              (t) =>
+                (t.rating - 55) / 60 -
+                Math.hypot(handler.x - t.x, handler.y - t.y) / 450
+            )
+          )
+        : -1;
       const choiceRand = Math.random();
-      if (choiceRand < 0.04 + Math.max(0, 0.25 * passScore)) {
-        // pass
+      // More likely to pass than shoot; shooting reserved for good situations
+      if (choiceRand < 0.22 + Math.max(0, 0.35 * passScore)) {
         const target = weightedChoice(
           teammates,
-          (t) => t.rating + 30 - Math.hypot(handler.x - t.x, handler.y - t.y)
+          (t) => t.rating + 20 - Math.hypot(handler.x - t.x, handler.y - t.y)
         );
         if (target) {
           initiatePass(handler, target);
           cp.phase = "pass";
           cp.phaseStart = performance.now();
         }
-      } else if (choiceRand < 0.12 + Math.max(0, 0.4 * shotScore)) {
-        // shoot
+      } else if (choiceRand < 0.28 + Math.max(0, 0.5 * shotScore)) {
+        // shoot only when reasonably attractive
         initiateShot(handler);
         cp.phase = "shoot";
         cp.phaseStart = performance.now();
       } else {
-        // continue dribbling for a bit (reset minDribble)
-        cp.minDribble = 1 + Math.random() * 2;
+        // continue dribbling
+        cp.minDribble = 0.9 + Math.random() * 2.2;
         cp.phaseStart = performance.now();
-        // move handler a bit to simulate movement
-        handler.tx = handler.x + (Math.random() * 120 - 60);
+        handler.tx = Math.max(
+          60,
+          Math.min(canvas.width - 60, handler.x + (Math.random() * 160 - 80))
+        );
         handler.ty = Math.max(
           60,
-          Math.min(canvas.height - 60, handler.y + (Math.random() * 80 - 40))
+          Math.min(canvas.height - 60, handler.y + (Math.random() * 120 - 60))
         );
-        // small turnover chance while dribbling
-        if (Math.random() < 0.01 + (80 - handler.energy) / 200) {
-          // turnover (steal)
+        // small turnover chance only if defenders very close
+        const nearestDef = findNearestDefender(handler);
+        const defDist = nearestDef
+          ? Math.hypot(nearestDef.x - handler.x, nearestDef.y - handler.y)
+          : 999;
+        const stealProb = Math.max(
+          0,
+          0.005 + (100 - defDist) / 1000 + (80 - handler.energy) / 2000
+        );
+        if (Math.random() < stealProb) {
           handleTurnover(handler);
         }
       }
     }
   } else if (cp.phase === "pass") {
-    // pass handled by ball flight; check for interception chance during flight
-    // interceptions are handled during pass initiation and flight arrival
-    if (game.ball.state === "held" && game.ball.holder === cp.handler) {
-      // pass didn't actually start (rare), fallback to dribble
-      cp.phase = "dribble";
-      cp.phaseStart = performance.now();
+    // nothing to do here; pass interception handled in initiatePass flight
+    if (
+      game.ball.state === "held" &&
+      game.ball.holder &&
+      game.ball.holder.team === cp.handler.team &&
+      game.ball.holder !== cp.handler
+    ) {
+      // arrived to teammate; already switched to dribble earlier
     }
   } else if (cp.phase === "shoot") {
-    // during shot, the ball is flying; resolution after flight handled earlier
-    // ensure shot clock is respected
+    // waiting for shot flight resolution
   }
 
   // shot clock turnover
   if (game.possessionTime <= 0) {
-    // turnover on shot clock
     log(`Shot clock violation for ${game.offense}`);
     game.offense = game.offense === "home" ? "away" : "home";
     game.possessionTime = 24;
     game.currentPlay = null;
     game.ball.state = "held";
-    // place ball at midcourt for new possession
     const newHandler = game.players.find((p) => p.team === game.offense);
     if (newHandler) {
       game.ball.holder = newHandler;
@@ -477,7 +509,6 @@ function stepGame(dt) {
 
 // ---- helpers ----
 function startPossession() {
-  // start inbound for current offense
   const offenseTeam = game.offense;
   const offensePlayers = game.players.filter((p) => p.team === offenseTeam);
   const handler = weightedChoice(offensePlayers, (p) => p.rating + 10);
@@ -486,11 +517,12 @@ function startPossession() {
     phase: "inbound",
     handler,
     phaseStart: performance.now(),
-    duration: 0.8 + Math.random() * 1.2,
-    minDribble: 0.8 + Math.random() * 1.2,
+    duration: 0.7 + Math.random() * 1.0,
+    minDribble: 0.9 + Math.random() * 1.4,
   };
+  // set shot clock full on new possession
   game.possessionTime = 24;
-  // position players into offensive shape
+  // position offensive and defensive shapes
   const baseX = offenseTeam === "home" ? 160 : canvas.width - 160;
   const spreadY = [-80, -40, 0, 40, 80];
   const offPlayers = game.players.filter((p) => p.team === offenseTeam);
@@ -498,63 +530,110 @@ function startPossession() {
     p.tx = baseX + (Math.random() * 40 - 20);
     p.ty = canvas.height / 2 + spreadY[i] + (Math.random() * 30 - 15);
   });
-  // defenders position
   const defPlayers = game.players.filter((p) => p.team !== offenseTeam);
   defPlayers.forEach((p, i) => {
     p.tx = canvas.width - baseX + (Math.random() * 40 - 20);
     p.ty = canvas.height / 2 + spreadY[i] + (Math.random() * 30 - 15);
   });
-  // ball state becomes "inbound" visually
+  // visual inbound flight from center to handler
   game.ball.state = "flying";
   game.ball.flightType = "inbound";
   const inboundTarget = { x: handler.x, y: handler.y };
-  game.ball.vx = (inboundTarget.x - game.ball.x) / 0.6;
-  game.ball.vy = (inboundTarget.y - game.ball.y) / 0.6;
-  game.ball.ttl = 0.6;
+  const travel = 0.55;
+  game.ball.vx = (inboundTarget.x - game.ball.x) / travel;
+  game.ball.vy = (inboundTarget.y - game.ball.y) / travel;
+  game.ball.ttl = travel;
+  game.ball.holder = null;
 }
 
 function initiatePass(from, to) {
-  // create a ball flight from 'from' to 'to'
   const travel =
-    0.25 + Math.min(1.0, Math.hypot(from.x - to.x, from.y - to.y) / 400);
-  // interception chance based on defenders near pass line
+    0.28 + Math.min(1.0, Math.hypot(from.x - to.x, from.y - to.y) / 420);
+  // compute possible interceptors near pass midpoint
+  const midX = (from.x + to.x) / 2,
+    midY = (from.y + to.y) / 2;
   const defenders = game.players.filter((p) => p.team !== from.team);
-  const interceptChance = Math.min(
-    0.35,
-    0.05 +
-      Math.max(
-        ...defenders.map((d) =>
-          Math.max(
-            0,
-            0.12 *
-              (80 -
-                Math.hypot(
-                  d.x - (from.x + to.x) / 2,
-                  d.y - (from.y + to.y) / 2
-                ))
-          )
-        )
-      )
+  // restrict to defenders reasonably close to the pass line
+  const interceptors = defenders.filter(
+    (d) => Math.hypot(d.x - midX, d.y - midY) < 140
   );
-  if (Math.random() < interceptChance) {
-    // intercepted: choose defender
-    const interceptors = defenders.filter(
-      (d) =>
-        Math.hypot(d.x - (from.x + to.x) / 2, d.y - (from.y + to.y) / 2) < 180
+  // if there are interceptors, let each have a chance proportional to proximity & rating
+  if (interceptors.length) {
+    // sort by proximity (closer more likely)
+    interceptors.sort(
+      (a, b) =>
+        Math.hypot(a.x - midX, a.y - midY) - Math.hypot(b.x - midX, b.y - midY)
     );
+    for (let d of interceptors) {
+      const dDist = Math.hypot(d.x - midX, d.y - midY);
+      // closer => higher chance; rating helps
+      const base = 0.06 + Math.max(0, (140 - dDist) / 800);
+      const rated = base + (d.rating - 60) / 600;
+      const chance = Math.min(0.5, Math.max(0.02, rated));
+      if (Math.random() < chance) {
+        // interception succeed
+        game.ball.state = "held";
+        game.ball.holder = d;
+        d.tx = d.x;
+        d.ty = d.y;
+        log(`${d.name} (${d.team}) intercepted a pass!`);
+        game.offense = d.team;
+        game.possessionTime = 24;
+        game.currentPlay = {
+          phase: "dribble",
+          handler: d,
+          phaseStart: performance.now(),
+          minDribble: 0.6,
+        };
+        return;
+      }
+    }
+  }
+  // no interceptor -> normal pass
+  game.ball.state = "flying";
+  game.ball.flightType = "pass";
+  game.ball.ttl = travel;
+  game.ball.vx = (to.x - from.x) / travel;
+  game.ball.vy = (to.y - from.y) / travel;
+  game.ball.points = 0;
+  game.ball.holder = null;
+}
+
+function initiateShot(shooter) {
+  const targetX = getOpponentBasketX(shooter.team);
+  const targetY = getBasketY();
+  const dist = Math.hypot(targetX - shooter.x, targetY - shooter.y);
+  const travel = 0.55 + Math.min(1.2, dist / 420);
+  game.ball.state = "flying";
+  game.ball.flightType = "shot";
+  game.ball.shooter = shooter;
+  game.ball.shotTarget = { x: targetX, y: targetY };
+  game.ball.vx = (targetX - shooter.x) / travel;
+  game.ball.vy = (targetY - shooter.y) / travel;
+  game.ball.ttl = travel;
+  game.ball.points = Math.random() < 0.12 ? 3 : 2;
+  game.ball.holder = null;
+}
+
+function handleTurnover(handler) {
+  // only allow steals from defenders reasonably close
+  const defenders = game.players.filter((p) => p.team !== handler.team);
+  const nearby = defenders.filter(
+    (d) => Math.hypot(d.x - handler.x, d.y - handler.y) < 100
+  );
+  if (nearby.length) {
     const thief = weightedChoice(
-      interceptors.length ? interceptors : defenders,
-      (d) => d.rating + 10
+      nearby,
+      (d) => d.rating + (120 - Math.hypot(d.x - handler.x, d.y - handler.y))
     );
     if (thief) {
-      game.ball.state = "held";
-      game.ball.holder = thief;
-      thief.tx = thief.x;
-      thief.ty = thief.y;
-      log(`${thief.name} (${thief.team}) intercepted a pass!`);
-      // turnover: switch offense
+      log(
+        `${handler.name} (${handler.team}) lost the ball to ${thief.name} (${thief.team})`
+      );
       game.offense = thief.team;
       game.possessionTime = 24;
+      game.ball.state = "held";
+      game.ball.holder = thief;
       game.currentPlay = {
         phase: "dribble",
         handler: thief,
@@ -564,68 +643,18 @@ function initiatePass(from, to) {
       return;
     }
   }
-  game.ball.state = "flying";
-  game.ball.flightType = "pass";
-  game.ball.ttl = travel;
-  game.ball.vx = (to.x - from.x) / travel;
-  game.ball.vy = (to.y - from.y) / travel;
-  game.ball.points = 0;
-  // visual: detach ball from from
-  game.ball.holder = null;
-}
-
-function initiateShot(shooter) {
-  const targetX = getBasketX(shooter.team);
-  const targetY = getBasketY();
-  const dist = Math.hypot(targetX - shooter.x, targetY - shooter.y);
-  const travel = 0.5 + Math.min(1.2, dist / 400);
-  game.ball.state = "flying";
-  game.ball.flightType = "shot";
-  game.ball.shooter = shooter;
-  game.ball.shotTarget = { x: targetX, y: targetY };
-  game.ball.vx = (targetX - shooter.x) / travel;
-  game.ball.vy = (targetY - shooter.y) / travel;
-  game.ball.ttl = travel;
-  game.ball.points = Math.random() < 0.12 ? 3 : 2; // occasional 3PT
-  // remove ball holder
-  game.ball.holder = null;
-}
-
-function handleTurnover(handler) {
-  // choose a defender who makes the steal
-  const defenders = game.players.filter((p) => p.team !== handler.team);
-  const thief = weightedChoice(
-    defenders,
-    (d) => d.rating + (120 - Math.hypot(d.x - handler.x, d.y - handler.y))
-  );
-  if (thief) {
-    log(
-      `${handler.name} (${handler.team}) lost the ball to ${thief.name} (${thief.team})`
-    );
-    game.offense = thief.team;
-    game.possessionTime = 24;
-    game.ball.state = "held";
-    game.ball.holder = thief;
-    game.currentPlay = {
-      phase: "dribble",
-      handler: thief,
-      phaseStart: performance.now(),
-      minDribble: 0.6,
-    };
-  } else {
-    // fallback: just lose possession
-    game.offense = game.offense === "home" ? "away" : "home";
-    game.currentPlay = null;
-  }
+  // fallback: turnover without a steal (change possession without thief)
+  game.offense = game.offense === "home" ? "away" : "home";
+  game.currentPlay = null;
 }
 
 function setInboundAfterScore() {
-  // opponent inbounds after a made basket
   game.offense = game.offense === "home" ? "away" : "home";
   game.currentPlay = null;
   game.possessionTime = 24;
-  // place ball center and let startPossession handle inbound
+  // center ball and wait for startPossession to inbound
   game.ball.state = "held";
+  game.ball.holder = null;
   game.ball.x = canvas.width / 2;
   game.ball.y = canvas.height / 2;
 }
@@ -635,24 +664,21 @@ function resolveShotOutcome(shooter, shotTarget) {
   const dx = shotTarget.x - shooter.x;
   const dy = shotTarget.y - shooter.y;
   const dist = Math.hypot(dx, dy);
-  const distFactor = Math.max(0.15, 1 - dist / 600);
-  // nearest defender adds pressure
+  const distFactor = Math.max(0.12, 1 - dist / 700);
   const defender = findNearestDefender(shooter);
-  const pressure = defender ? Math.max(0, 70 - defender.rating) / 200 : 0;
-  // base probability
-  const base = 0.3 + (rating - 60) / 220;
+  const pressure = defender ? Math.max(0, 70 - defender.rating) / 220 : 0;
+  const base = 0.28 + (rating - 60) / 240;
   const makeProb = Math.max(
     0.03,
-    Math.min(0.9, base * distFactor - pressure + (Math.random() - 0.5) * 0.08)
+    Math.min(0.92, base * distFactor - pressure + (Math.random() - 0.5) * 0.07)
   );
   return Math.random() < makeProb;
 }
 
 function chooseRebounder(shooter) {
-  // prefer bigger and closer defenders for defensive rebounds, otherwise offense
   const defenders = game.players.filter((p) => p.team !== shooter.team);
   const offense = game.players.filter((p) => p.team === shooter.team);
-  const defProb = 0.7; // defensive rebound more likely
+  const defProb = 0.68;
   if (Math.random() < defProb)
     return weightedChoice(
       defenders,
@@ -700,7 +726,7 @@ function findClosestPlayer(x, y, team) {
   }, pool[0]);
 }
 
-function getBasketX(team) {
+function getOpponentBasketX(team) {
   return team === "home" ? canvas.width - 30 : 30;
 }
 function getBasketY() {
@@ -757,13 +783,13 @@ function render() {
 
   // HUD
   ctx.fillStyle = "rgba(0,0,0,0.6)";
-  ctx.fillRect(10, 10, 300, 48);
+  ctx.fillRect(10, 10, 340, 52);
   ctx.fillStyle = "#fff";
   ctx.font = "14px sans-serif";
   ctx.fillText(
     `${game.home.name} ${game.homeScore}  -  ${game.awayScore} ${game.away.name}`,
     20,
-    34
+    36
   );
   ctx.fillStyle = "#000";
   ctx.font = "12px monospace";
@@ -775,8 +801,8 @@ function render() {
     `Q${game.period}  ${minutes}:${seconds}   Shot: ${Math.ceil(
       game.possessionTime
     )}`,
-    canvas.width - 260,
-    30
+    canvas.width - 300,
+    34
   );
 }
 
