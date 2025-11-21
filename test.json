@@ -6,12 +6,6 @@
     "duration": 0.6
   },
   {
-    "type": "pass",
-    "from": { "team": "home", "name": "Donovan" },
-    "to": { "team": "home", "name": "Kyrie" },
-    "clock": "9:50"
-  },
-  {
     "type": "shot",
     "shooter": { "team": "home", "name": "Durant" },
     "made": false,
