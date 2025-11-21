@@ -1441,10 +1441,22 @@ function preprocessInstructions(orig) {
     // build playersGlobal from provided lineups (flatten home+away arrays)
     playersGlobal = [];
     if (lu.home && Array.isArray(lu.home)) {
-      lu.home.forEach((p) => playersGlobal.push({ ...p, team: "home" }));
+      lu.home.forEach((p) =>
+        playersGlobal.push(
+          typeof p === "string"
+            ? { name: p, team: "home" }
+            : { ...p, team: "home" }
+        )
+      );
     }
     if (lu.away && Array.isArray(lu.away)) {
-      lu.away.forEach((p) => playersGlobal.push({ ...p, team: "away" }));
+      lu.away.forEach((p) =>
+        playersGlobal.push(
+          typeof p === "string"
+            ? { name: p, team: "away" }
+            : { ...p, team: "away" }
+        )
+      );
     }
     // populate minimal teams array so UI can start without league.json
     if (!teams.length) {
