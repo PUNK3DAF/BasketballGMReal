@@ -537,10 +537,8 @@ function finalizeBallArrival(pending) {
     } else log(`${shooter.name} missed a free throw`);
     // after free throw, if pending.nextFreethrow true, schedule next; else await next event
     if (pending.next) {
-      // perform next free throw animation immediately
       performFreeThrow(pending.shooter, pending.next.made, pending.next);
     } else {
-      // after last FT, leave ball ground or set rebound if provided
       if (pending.rebound) {
         const r = pending.rebound;
         const rb = findPlayer(r.team, r.name);
@@ -550,7 +548,9 @@ function finalizeBallArrival(pending) {
           game.offense = rb.team;
           game.ball.x = rb.x + (rb.team === "home" ? 10 : -10);
           game.ball.y = rb.y - 8;
-        } else game.ball.state = "ground";
+        } else {
+          game.ball.state = "ground";
+        }
       } else {
         game.ball.state = "ground";
       }
@@ -741,7 +741,6 @@ function applyInstruction(ev, opts = {}) {
     }
 
     case "freethrow": {
-      // direct freethrow instruction (can be used by BGm export)
       const shooter = findPlayer(ev.shooter.team, ev.shooter.name);
       if (shooter)
         performFreeThrow(shooter, !!ev.made, {
@@ -790,14 +789,12 @@ function applyInstruction(ev, opts = {}) {
     }
 
     case "sub": {
-      // {type:"sub", team, out: "Name", in: "Name"}
       const outName = ev.out,
         inName = ev.in;
       const outIdx = game.players.findIndex(
         (p) => p.team === ev.team && p.name === outName
       );
       if (outIdx >= 0) {
-        // find in roster for rating if available
         const teamObj =
           teams.find((t) => t.id === game[ev.team].id) ||
           teams.find((t) => t.name === game[ev.team].name);
@@ -824,7 +821,6 @@ function applyInstruction(ev, opts = {}) {
     }
 
     case "outOfBounds": {
-      // ev: {type:"outOfBounds", x?, y?, awardedTo?: {team,name}}
       if (ev.x !== undefined && ev.y !== undefined) {
         game.ball.x = ev.x;
         game.ball.y = ev.y;
@@ -836,7 +832,6 @@ function applyInstruction(ev, opts = {}) {
       if (ev.awardedTo) {
         const handler = findPlayer(ev.awardedTo.team, ev.awardedTo.name);
         if (handler) {
-          // schedule immediate inbound to handler
           setTimeout(() => {
             applyInstruction(
               {
@@ -854,16 +849,13 @@ function applyInstruction(ev, opts = {}) {
     }
 
     case "timeout": {
-      // ev: {type:"timeout", team, handlerName?}
       const team = ev.team;
-      // move team to opponent half and place ball with handler near opponent half
       const handler = ev.handlerName
         ? findPlayer(team, ev.handlerName)
         : game.players.find((p) => p.team === team);
       if (handler) {
         const oppHalfX =
           handler.team === "home" ? canvas.width * 0.65 : canvas.width * 0.35;
-        // nudge all team players into attacking half
         game.players
           .filter((p) => p.team === team)
           .forEach((p, idx) => {
@@ -875,7 +867,6 @@ function applyInstruction(ev, opts = {}) {
               0.8
             );
           });
-        // give ball to handler placed near oppHalfX
         setTimeout(() => {
           handler.x = oppHalfX + 10;
           handler.y = canvas.height / 2;
@@ -891,7 +882,6 @@ function applyInstruction(ev, opts = {}) {
     }
 
     case "offensiveFoul":
-      // intentionally ignored per request (no offensive fouls)
       log("Offensive foul ignored (instruction)");
       break;
 
@@ -1087,6 +1077,27 @@ function preprocessInstructions(orig) {
         };
         filled.push(mv);
       }
+
+      // If the prior event is a rebound and the following shot is by same team but gap > 24s,
+      // inject a synthetic sideline inbound right before the shot (visualizes stoppage/reset).
+      if (
+        ev.type === "rebound" &&
+        next.type === "shot" &&
+        ev.team === next.shooter.team &&
+        gap > 24
+      ) {
+        const inboundTime = Math.min(ev.triggerAt - 0.1, next.triggerAt + 0.4); // just before the shot
+        const sidelineInbound = {
+          type: "inbound",
+          to: { team: next.shooter.team, name: next.shooter.name },
+          duration: 0.6,
+          generated: true,
+          reason: "sideline", // informational
+          triggerAt: inboundTime,
+        };
+        filled.push(sidelineInbound);
+      }
+
       // infer last holder
       let lastHolder = null;
       for (let j = i; j >= 0; j--) {
