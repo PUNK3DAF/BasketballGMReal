@@ -298,6 +298,20 @@ function startGame(home, away) {
     typeof r === "string" ? { name: r } : { ...r }
   );
 
+  // if preprocess provided playersGlobal with team tags, prefer those rosters
+  try {
+    const homeFromGlobal = (playersGlobal || [])
+      .filter((p) => p.team === "home")
+      .map((p) => ({ name: p.name, rating: p.rating || 60 }));
+    const awayFromGlobal = (playersGlobal || [])
+      .filter((p) => p.team === "away")
+      .map((p) => ({ name: p.name, rating: p.rating || 60 }));
+    if (homeFromGlobal.length >= 5 && (!home.roster || home.roster.length < 5))
+      home.roster = homeFromGlobal;
+    if (awayFromGlobal.length >= 5 && (!away.roster || away.roster.length < 5))
+      away.roster = awayFromGlobal;
+  } catch (e) {}
+
   // startClock uses highest trigger time if present
   let startClock = 12 * 60;
   if (instructions && instructions.length) {
@@ -305,6 +319,31 @@ function startGame(home, away) {
       ...instructions.map((e) => (e.triggerAt !== undefined ? e.triggerAt : -1))
     );
     if (maxTrigger > 0) startClock = maxTrigger;
+    // set offense by first instruction possession if available
+    const firstWithPoss = instructions.find(
+      (ev) =>
+        ev.type === "inbound" ||
+        ev.type === "pass" ||
+        ev.type === "rebound" ||
+        ev.type === "steal"
+    );
+    if (firstWithPoss) {
+      if (
+        firstWithPoss.type === "inbound" &&
+        firstWithPoss.to &&
+        firstWithPoss.to.team
+      )
+        gameOff = firstWithPoss.to.team;
+      else if (
+        firstWithPoss.type === "pass" &&
+        firstWithPoss.from &&
+        firstWithPoss.from.team
+      )
+        gameOff = firstWithPoss.from.team;
+      if (typeof gameOff !== "undefined") {
+        // will be applied to created game below
+      }
+    }
   }
 
   game = {
@@ -326,7 +365,12 @@ function startGame(home, away) {
       flightType: null,
     },
     players: [],
-    offense: Math.random() < 0.5 ? "home" : "away",
+    offense:
+      typeof gameOff !== "undefined"
+        ? gameOff
+        : Math.random() < 0.5
+        ? "home"
+        : "away",
     paused: false,
     speed: parseFloat(speedSlider.value) || 1,
     possessionTime: 24,
@@ -336,10 +380,10 @@ function startGame(home, away) {
     repositionTimer: 0.6,
   };
 
-  function chooseFive(roster) {
+  function chooseFive(roster, fallbackNamePrefix) {
     if (!roster || roster.length === 0) {
       return Array.from({ length: 5 }, (_, i) => ({
-        name: `Player${i + 1}`,
+        name: `${fallbackNamePrefix}${i + 1}`,
         rating: 60,
       }));
     }
@@ -349,19 +393,23 @@ function startGame(home, away) {
     const five = sorted
       .slice(0, Math.min(5, sorted.length))
       .map((p) => ({ name: p.name, rating: p.rating || 60 }));
-    while (five.length < 5) five.push({ name: "Sub", rating: 55 });
+    while (five.length < 5)
+      five.push({
+        name: `${fallbackNamePrefix}Sub${five.length + 1}`,
+        rating: 55,
+      });
     return five;
   }
 
-  const homeFive = chooseFive(home.roster);
-  const awayFive = chooseFive(away.roster);
+  const homeFive = chooseFive(home.roster, "H");
+  const awayFive = chooseFive(away.roster, "A");
 
   const positionsHome = [
-    { x: 200, y: 250 },
-    { x: 120, y: 140 },
-    { x: 120, y: 360 },
-    { x: 300, y: 110 },
-    { x: 300, y: 390 },
+    { x: canvas.width * 0.28, y: canvas.height * 0.5 },
+    { x: canvas.width * 0.18, y: canvas.height * 0.26 },
+    { x: canvas.width * 0.18, y: canvas.height * 0.74 },
+    { x: canvas.width * 0.34, y: canvas.height * 0.18 },
+    { x: canvas.width * 0.34, y: canvas.height * 0.82 },
   ];
   const positionsAway = positionsHome.map((p) => ({
     x: canvas.width - p.x,
@@ -404,6 +452,8 @@ function startGame(home, away) {
 
   if (animRequest) cancelAnimationFrame(animRequest);
   game.lastUpdate = performance.now();
+  // ensure an initial formation for both teams
+  setTeamAttackPositions(game.offense);
   animLoop();
 }
 
@@ -559,8 +609,9 @@ function prepareForNextInstruction() {
   if (!(timeToEvent > 0 && timeToEvent <= Math.max(APPROACH_THRESHOLD, 0.5)))
     return;
 
-  // figure which team will be on offense for the upcoming event
+  // determine offense team and special shooter
   let offenseTeam = null;
+  let shooterName = null;
   if (ev.type === "inbound") offenseTeam = ev.to && ev.to.team;
   else if (
     ev.type === "pass" ||
@@ -571,57 +622,90 @@ function prepareForNextInstruction() {
       (ev.from && ev.from.team) ||
       (ev.shooter && ev.shooter.team) ||
       (ev.to && ev.to.team);
+    if (ev.type === "shot" && ev.shooter) shooterName = ev.shooter.name;
   } else if (ev.type === "rebound") offenseTeam = ev.team;
   else if (ev.type === "steal") offenseTeam = ev.to && ev.to.team;
   else if (ev.type === "outOfBounds" && ev.awardedTo)
     offenseTeam = ev.awardedTo.team;
 
-  const offsetAttack = 120;
-  const guardOffset = 80;
+  // compute per-player targets but be conservative with timing/durations
   const centerY = canvas.height / 2;
-  const offsets = [-120, -40, 40, 120, 0];
-
-  // helper: own basket x
-  const ownBasketX = (team) => (team === "home" ? 30 : canvas.width - 30);
-  const oppBasketX = (team) => getOpponentBasketX(team);
+  const midX = canvas.width / 2;
+  const offsets = [-100, -40, 40, 100, 0];
 
   game.players.forEach((p, idx) => {
-    // compute desired target
-    const target = { x: p.tx, y: p.ty };
+    let targetX = p.tx ?? p.x;
+    let targetY = p.ty ?? p.y;
+
     if (offenseTeam && p.team === offenseTeam) {
-      // offense: move toward opponent basket (attacking side) but not on top of rim
-      const dirSign = p.team === "home" ? -1 : 1;
-      target.x = oppBasketX(p.team) + dirSign * -offsetAttack;
-      target.y = centerY + offsets[idx % offsets.length] + idx * 6;
+      // shooter gets closer to scoring location if specified, others get spacing
+      if (shooterName && p.name === shooterName) {
+        const rimX = getOpponentBasketX(p.team);
+        const isThree = ev.points === 3;
+        const approach = isThree ? 180 : 100;
+        // stay inside court and inside offensive half (do not cross midline)
+        const desiredX =
+          p.team === "home"
+            ? clamp(rimX - approach, midX + 20, canvas.width - 40)
+            : clamp(rimX + approach, 40, midX - 20);
+        targetX = desiredX;
+        targetY = clamp(
+          centerY + (Math.random() * 40 - 20),
+          40,
+          canvas.height - 40
+        );
+      } else {
+        // spacing positions around the shooter/rim but not on top of it
+        const spacingX =
+          p.team === "home"
+            ? Math.round(midX + 80 + (idx - 2) * 24)
+            : Math.round(midX - 80 + (idx - 2) * 24);
+        targetX = clamp(spacingX, 40, canvas.width - 40);
+        targetY = clamp(
+          centerY + offsets[idx % offsets.length],
+          40,
+          canvas.height - 40
+        );
+      }
     } else if (offenseTeam) {
-      // defense: position near own basket to guard it (don't go to opponent half)
-      target.x =
-        ownBasketX(p.team) + (p.team === "home" ? guardOffset : -guardOffset);
-      target.y = centerY + offsets[idx % offsets.length] + idx * -6;
+      // defenders hold defensive positions (stay on own half and mark general spacing)
+      const defendBaseX =
+        p.team === "home" ? Math.round(midX - 80) : Math.round(midX + 80);
+      targetX = clamp(defendBaseX + (idx - 2) * 18, 40, canvas.width - 40);
+      targetY = clamp(
+        centerY + offsets[idx % offsets.length],
+        40,
+        canvas.height - 40
+      );
     } else {
-      // no clear offense: mild halfcourt setup
-      target.x = canvas.width / 2 + (p.team === "home" ? -80 : 80);
-      target.y = centerY + offsets[idx % offsets.length];
+      targetX = clamp(
+        midX + (p.team === "home" ? -80 : 80) + (idx - 2) * 18,
+        40,
+        canvas.width - 40
+      );
+      targetY = clamp(
+        centerY + offsets[idx % offsets.length],
+        40,
+        canvas.height - 40
+      );
     }
 
-    // Only set a new tween if not already moving toward roughly the same spot,
-    // or if current move is nearly finished (prevents overwrite every frame).
     const targetDelta = Math.hypot(
-      (p.tx || p.x) - target.x,
-      (p.ty || p.y) - target.y
+      (p.tx || p.x) - targetX,
+      (p.ty || p.y) - targetY
     );
     const needReset =
-      !p.move || targetDelta > 18 || (p.move && p.move.tleft < 0.12);
-
+      !p.move || targetDelta > 14 || (p.move && p.move.tleft < 0.25);
     if (needReset) {
-      // duration scaled by distance and available time; ensure sensible min/max
-      const dx = target.x - p.x;
-      const dy = target.y - p.y;
+      const dx = targetX - p.x,
+        dy = targetY - p.y;
       const dist = Math.hypot(dx, dy);
-      const maxDur = Math.max(0.35, timeToEvent * 0.9);
-      const speed = PLAYER_BASE_SPEED * 1.8;
-      const dur = Math.max(0.18, Math.min(maxDur, dist / speed));
-      setMoveTween(p, target.x, target.y, dur);
+      const maxDur = Math.max(0.45, Math.min(1.4, timeToEvent * 0.9));
+      const dur = Math.max(
+        0.45,
+        Math.min(maxDur, dist / (PLAYER_BASE_SPEED * 0.9))
+      );
+      setMoveTween(p, targetX, targetY, dur);
     }
   });
 }
@@ -726,14 +810,13 @@ function setMoveTween(p, tx, ty, duration) {
   const margin = 40;
   tx = Math.max(margin, Math.min(canvas.width - margin, tx));
   ty = Math.max(margin, Math.min(canvas.height - margin, ty));
-  p.move = {
-    sx: p.x,
-    sy: p.y,
-    tx: tx,
-    ty: ty,
-    tleft: duration || 0.001,
-    duration: duration || 0.001,
-  };
+  const dx = tx - p.x;
+  const dy = ty - p.y;
+  const dist = Math.hypot(dx, dy);
+  // slower min speed so players don't teleport cross-court
+  const durFromDist = dist / (PLAYER_BASE_SPEED * 0.9);
+  const dur = Math.max(0.45, Math.min(duration || durFromDist || 0.45, 1.6));
+  p.move = { sx: p.x, sy: p.y, tx: tx, ty: ty, tleft: dur, duration: dur };
   p.tx = tx;
   p.ty = ty;
 }
@@ -1527,90 +1610,61 @@ function setTeamAttackPositions(offenseTeam) {
   if (!game) return;
   const centerY = canvas.height / 2;
   const midX = canvas.width / 2;
-  const offsets = [-110, -45, 45, 110, 0];
   const margin = 40;
-  const attackOffset = 120;
-  const guardOffset = 80;
+  const attackDepth = 120; // how far into offensive half
+  const yOffsets = [-100, -40, 40, 100, 0];
 
-  const offensePlayers = game.players.filter(
-    (p) => offenseTeam && p.team === offenseTeam
-  );
+  // compute canonical positions for offense (relative to midline toward opponent rim)
+  const offenseTargets = [];
+  for (let i = 0; i < 5; i++) {
+    const y = clamp(
+      centerY + yOffsets[i % yOffsets.length],
+      margin,
+      canvas.height - margin
+    );
+    offenseTargets.push({ offsetY: y });
+  }
 
   game.players.forEach((p, idx) => {
-    let tx = p.tx,
-      ty = p.ty;
+    let tx = p.tx ?? p.x;
+    let ty = p.ty ?? p.y;
 
     if (offenseTeam && p.team === offenseTeam) {
-      const basketX = getOpponentBasketX(p.team);
-      const desiredX =
-        p.team === "home" ? basketX - attackOffset : basketX + attackOffset;
-      // ensure attackers stay between mid and near rim
-      tx = clamp(
-        p.team === "home"
-          ? Math.max(midX + 40, desiredX)
-          : Math.min(midX - 40, desiredX),
-        margin,
-        canvas.width - margin
-      );
-      ty = clamp(
-        centerY + offsets[idx % offsets.length] + idx * 4,
-        margin,
-        canvas.height - margin
-      );
+      // put offense on attacking half but keep spacing (don't all crowd the rim)
+      const rimX = getOpponentBasketX(p.team);
+      const toward = p.team === "home" ? -1 : 1; // home attacks right->left (rim at x=30), away left->right
+      const baseX = Math.round(midX + toward * attackDepth);
+      // stagger x slightly so not everyone stacks on same x
+      const stagger = (idx - 2) * 30;
+      tx = clamp(baseX + stagger, margin, canvas.width - margin);
+      ty = offenseTargets[idx].offsetY;
     } else if (offenseTeam) {
-      // defenders shadow likely opponent but stay on own half
-      let mark = null;
-      if (offensePlayers.length)
-        mark =
-          offensePlayers[idx] ||
-          offensePlayers.reduce((a, b) =>
-            Math.hypot(a.x - p.x, a.y - p.y) < Math.hypot(b.x - p.x, b.y - p.y)
-              ? a
-              : b
-          );
-      if (mark) {
-        const ox = mark.x + (Math.random() * 30 - 15);
-        const oy = mark.y + (Math.random() * 24 - 12);
-        if (p.team === "home") {
-          tx = clamp(Math.min(ox, midX - 20), margin, midX - 20);
-        } else {
-          tx = clamp(Math.max(ox, midX + 20), midX + 20, canvas.width - margin);
-        }
-        ty = clamp(oy, margin, canvas.height - margin);
-      } else {
-        const ownX = p.team === "home" ? 80 : canvas.width - 80;
-        tx = clamp(
-          ownX + (p.team === "home" ? guardOffset : -guardOffset),
-          margin,
-          canvas.width - margin
-        );
-        ty = clamp(
-          centerY + offsets[idx % offsets.length],
-          margin,
-          canvas.height - margin
-        );
-      }
+      // defenders: hold on defensive half and mark opposing spacing rather than chasing into the rim
+      const defendBaseX =
+        p.team === "home"
+          ? Math.round(midX - attackDepth * 0.6)
+          : Math.round(midX + attackDepth * 0.6);
+      const stagger = (idx - 2) * 30;
+      tx = clamp(defendBaseX + stagger, margin, canvas.width - margin);
+      ty = clamp(centerY + (idx - 2) * 24, margin, canvas.height - margin);
     } else {
+      // neutral: mild halfcourt positions
       tx = clamp(
-        canvas.width / 2 + (p.team === "home" ? -80 : 80),
+        midX + (p.team === "home" ? -80 : 80) + (idx - 2) * 18,
         margin,
         canvas.width - margin
       );
-      ty = clamp(
-        centerY + offsets[idx % offsets.length],
-        margin,
-        canvas.height - margin
-      );
+      ty = clamp(centerY + (idx - 2) * 28, margin, canvas.height - margin);
     }
 
-    // only retarget if meaningfully different
-    if (Math.hypot((p.tx || p.x) - tx, (p.ty || p.y) - ty) > 12 || !p.move) {
+    // only retarget if meaningfully different to avoid jitter
+    if (Math.hypot((p.tx || p.x) - tx, (p.ty || p.y) - ty) > 10 || !p.move) {
       const dx = tx - p.x,
         dy = ty - p.y,
         dist = Math.hypot(dx, dy);
       const travel = Math.max(
-        0.35,
-        Math.min(1.6, dist / (PLAYER_BASE_SPEED * 1.0))
+        0.45,
+        Math.min(1.4, dist / (PLAYER_BASE_SPEED * 0.9))
       );
       setMoveTween(p, tx, ty, travel);
     }
