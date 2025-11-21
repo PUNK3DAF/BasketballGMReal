@@ -1,5 +1,26 @@
 [
   {
+    "type": "lineups",
+    "home": [
+      "Donovan",
+      "Kyrie",
+      "Durant",
+      "Player1",
+      "Player2",
+      "PlayerX",
+      "BenchA"
+    ],
+    "away": [
+      "LeBron",
+      "AD",
+      "PlayerA",
+      "PlayerB",
+      "PlayerC",
+      "PlayerD",
+      "BenchZ"
+    ]
+  },
+  {
     "type": "inbound",
     "to": { "team": "home", "name": "Donovan" },
     "clock": "10:00",
@@ -12,7 +33,12 @@
     "points": 3,
     "clock": "9:45"
   },
-  { "type": "rebound", "team": "away", "name": "LeBron", "clock": "9:25" },
+  {
+    "type": "rebound",
+    "team": "away",
+    "name": "LeBron",
+    "clock": "9:25"
+  },
   {
     "type": "shot",
     "shooter": { "team": "away", "name": "LeBron" },
@@ -56,5 +82,10 @@
     "handlerName": "Kyrie",
     "clock": "7:50"
   },
-  { "type": "setScore", "home": 10, "away": 12, "clock": "7:48" }
+  {
+    "type": "setScore",
+    "home": 10,
+    "away": 12,
+    "clock": "7:48"
+  }
 ]
