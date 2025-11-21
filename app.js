@@ -233,9 +233,9 @@ function animLoop(t) {
 }
 
 // --- game logic with state machine ---
+// NOTE: shot-clock fix — ensure new possession is initialized before decreasing shot clock
 function stepGame(dt) {
-  // clocks
-  game.possessionTime -= dt;
+  // advance game clock first
   game.timeLeft -= dt;
   if (game.timeLeft <= 0) {
     game.period++;
@@ -248,6 +248,15 @@ function stepGame(dt) {
       log("Start of period " + game.period);
     }
   }
+
+  // If there's no current play yet, start the possession and skip shot-clock decrement this frame
+  if (!game.currentPlay) {
+    startPossession();
+    return;
+  }
+
+  // Now decrement shot clock for an active possession
+  game.possessionTime -= dt;
 
   // update players movement towards targets
   game.players.forEach((p) => {
@@ -349,12 +358,6 @@ function stepGame(dt) {
         }
       }
     }
-  }
-
-  // if no current play (or possession and ready), create inbound/setup
-  if (!game.currentPlay) {
-    startPossession();
-    return;
   }
 
   // handle current play phases
