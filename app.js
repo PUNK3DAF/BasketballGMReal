@@ -1,4 +1,4 @@
-// app.js - Instruction Replay with realistic transitions
+// app.js - Instruction Replay with realistic transitions + clock scheduling
 // Replace your current file with this version.
 
 const fileInput = document.getElementById("fileInput");
@@ -23,11 +23,10 @@ const canvas = document.getElementById("court");
 const ctx = canvas.getContext("2d");
 
 // --- realistic tuning constants ---
-const PLAYER_BASE_SPEED = 120; // px/sec for a full-duration move interpolation baseline
-const STEAL_RADIUS = 36; // px -- must be within this to steal
+const PLAYER_BASE_SPEED = 120; // px/sec baseline
+const STEAL_RADIUS = 36; // px
 const STEAL_APPROACH_SPEED = 160; // px/sec when approaching to steal
 const THREE_PT_DIST = 220; // px from basket to be considered a 3-pointer
-const PASS_INTERCEPT_RADIUS = 28; // px for simple pass interception (not used aggressively here)
 
 let league = null;
 let teams = [];
@@ -36,7 +35,7 @@ let game = null;
 let animRequest = null;
 
 // Instruction replay state
-let instructions = []; // array of events
+let instructions = []; // array of event objects (may include synthetic)
 let instrIndex = 0;
 let instrPlaying = false;
 let instrTimer = null;
@@ -69,9 +68,10 @@ loadInstrBtn.addEventListener("click", async () => {
       log("Instructions file must be a JSON array of events.");
       return;
     }
-    instructions = data;
+    // parse and preprocess (clock parsing, assist pass insertion, gap-filling)
+    instructions = preprocessInstructions(data);
     instrIndex = 0;
-    log(`Loaded ${instructions.length} instructions.`);
+    log(`Loaded ${instructions.length} instructions (with preprocessing).`);
     render(); // show initial state
   } catch (err) {
     log("Error loading instructions: " + err.message);
@@ -84,7 +84,12 @@ playInstrBtn.addEventListener("click", () => {
     return;
   }
   instrPlaying = true;
-  advanceInstr(); // starts playback
+  // if playing by clock, animLoop will dispatch events as time elapses
+  if (!game) {
+    const home = teams[0],
+      away = teams[1];
+    if (home && away) startGame(home, away);
+  }
 });
 
 pauseInstrBtn.addEventListener("click", () => {
@@ -111,7 +116,6 @@ startBtn.addEventListener("click", () => {
   }
   const home = teams.find((t) => t.id === homeId);
   const away = teams.find((t) => t.id === awayId);
-  // start chosen mode (both modes need initial player placement)
   startGame(home, away);
 });
 
@@ -207,13 +211,24 @@ function populateTeamSelectors() {
 
 // --- game state and animation ---
 function startGame(home, away) {
+  // if instructions provide a max clock, start there so events happen as expected
+  let startClock = 12 * 60;
+  if (instructions && instructions.length) {
+    const maxTrigger = Math.max(
+      0,
+      ...instructions.map((e) => (e.triggerAt !== undefined ? e.triggerAt : 0))
+    );
+    // If maxTrigger provided and less than 12*60, keep 12*60; else use maxTrigger
+    startClock = Math.max(12 * 60, maxTrigger);
+  }
+
   game = {
     home,
     away,
     homeScore: 0,
     awayScore: 0,
     period: 1,
-    timeLeft: 12 * 60,
+    timeLeft: startClock,
     ball: {
       x: canvas.width / 2,
       y: canvas.height / 2,
@@ -221,7 +236,7 @@ function startGame(home, away) {
       vy: 0,
       state: "held", // held, flying, ground
       holder: null,
-      pendingArrival: null, // object describing finalization when ttl hits zero
+      pendingArrival: null,
       ttl: 0,
       flightType: null,
     },
@@ -232,7 +247,7 @@ function startGame(home, away) {
     possessionTime: 24,
     lastUpdate: performance.now(),
     currentPlay: null,
-    pendingSteals: [], // array of {thief, from}
+    pendingSteals: [],
   };
 
   function chooseFive(roster) {
@@ -273,7 +288,7 @@ function startGame(home, away) {
       y: positionsHome[i].y,
       tx: positionsHome[i].x,
       ty: positionsHome[i].y,
-      move: null, // {sx,sy,tx,ty,tleft,duration}
+      move: null,
     })
   );
   awayFive.forEach((pl, i) =>
@@ -293,14 +308,14 @@ function startGame(home, away) {
   document.getElementById("awayLabel").textContent = away.name;
   document.getElementById("homeScore").textContent = "0";
   document.getElementById("awayScore").textContent = "0";
-  log(`Game started (${modeSelect.value}).`);
+  log(`Game started (${modeSelect.value}) at ${formatClock(game.timeLeft)}.`);
 
   if (animRequest) cancelAnimationFrame(animRequest);
   game.lastUpdate = performance.now();
   animLoop();
 }
 
-// animation loop: always update physics (players + ball), regardless of mode
+// animation loop: always update physics (players + ball)
 function animLoop(t) {
   if (!game) return;
   animRequest = requestAnimationFrame(animLoop);
@@ -310,11 +325,14 @@ function animLoop(t) {
   if (game.paused) return;
   const dt = dtReal * game.speed;
 
-  // update players and ball each frame so replay transitions animate correctly
+  // decrement game clock so timestamped events can trigger
+  game.timeLeft = Math.max(0, game.timeLeft - dt);
+
+  // update players and ball each frame so transitions animate
   updatePhysics(dt);
 
-  // if simulate mode, you might still want more AI; keep stepGame for fallback
-  if (modeSelect.value === "simulate") stepGame(dt);
+  // dispatch timed instructions when playing by clock
+  if (instrPlaying) dispatchTimedInstructions();
 
   render();
 }
@@ -322,7 +340,6 @@ function animLoop(t) {
 function updatePhysics(dt) {
   if (!game) return;
 
-  // update players' active tweens (move)
   game.players.forEach((p) => {
     if (p.move) {
       p.move.tleft -= dt;
@@ -336,7 +353,6 @@ function updatePhysics(dt) {
         p.move = null;
       }
     } else {
-      // subtle smoothing toward tx/ty when not doing a scheduled tween
       const dx = p.tx - p.x,
         dy = p.ty - p.y,
         dist = Math.hypot(dx, dy);
@@ -348,13 +364,12 @@ function updatePhysics(dt) {
     }
   });
 
-  // handle pending steal attempts (approach then finalize if close)
+  // pending steals approach logic
   if (game.pendingSteals && game.pendingSteals.length) {
     for (let i = game.pendingSteals.length - 1; i >= 0; i--) {
       const ps = game.pendingSteals[i];
       const thief = ps.thief;
       const from = ps.from;
-      // if either missing, remove
       if (!thief || !from) {
         game.pendingSteals.splice(i, 1);
         continue;
@@ -364,8 +379,6 @@ function updatePhysics(dt) {
         finalizeSteal(thief, from);
         game.pendingSteals.splice(i, 1);
       } else {
-        // keep moving thief toward the ball holder (approach)
-        // set a short move tween toward a point near the target
         const approachDist = Math.max(10, d - STEAL_RADIUS / 2);
         const nx = from.x + ((thief.x - from.x) / d) * approachDist || from.x;
         const ny = from.y + ((thief.y - from.y) / d) * approachDist || from.y;
@@ -385,9 +398,8 @@ function updatePhysics(dt) {
     if (b.ttl !== undefined) {
       b.ttl -= dt;
       if (b.ttl <= 0) {
-        // finalize according to pendingArrival object (deterministic)
         const pending = b.pendingArrival;
-        b.state = "held"; // default until overridden
+        b.state = "held";
         b.pendingArrival = null;
         b.flightType = null;
         b.ttl = 0;
@@ -397,40 +409,27 @@ function updatePhysics(dt) {
   }
 }
 
-// minimal simulate fallback kept (not used in replay except for extra behavior)
-function stepGame(dt) {
-  game.timeLeft -= dt;
-  // minor player drift handled in updatePhysics
-}
-
-// ---------------- Instruction interpreter ----------------
-// Event examples in prior file
-
-function advanceInstr() {
-  if (!instructions.length) return;
-  if (instrIndex >= instructions.length) {
-    instrPlaying = false;
-    return;
+function dispatchTimedInstructions() {
+  if (!instructions || instrIndex >= instructions.length) return;
+  // instructions are sorted descending by triggerAt (seconds left)
+  // Apply all events whose triggerAt >= game.timeLeft (i.e., time has passed to or past that clock)
+  while (instrIndex < instructions.length) {
+    const ev = instructions[instrIndex];
+    if (ev.triggerAt === undefined) {
+      // immediate (no clock) events: apply only if playback requested via step / play
+      // apply now if instrPlaying and no triggerAt
+      applyInstruction(ev);
+      instrIndex++;
+      continue;
+    }
+    // If game.timeLeft <= ev.triggerAt then it's time (clock counts down)
+    if (game.timeLeft <= ev.triggerAt) {
+      applyInstruction(ev);
+      instrIndex++;
+      continue;
+    }
+    break;
   }
-  const ev = instructions[instrIndex];
-  applyInstruction(ev);
-  instrIndex++;
-  if (instrPlaying && instrIndex < instructions.length) {
-    const delay = evtDelay(ev) || parseInt(instrDelayEl.value || 800, 10);
-    instrTimer = setTimeout(advanceInstr, delay);
-  } else {
-    instrPlaying = false;
-  }
-}
-
-function evtDelay(ev) {
-  if (!ev) return 0;
-  if (ev.delay !== undefined) return ev.delay;
-  if (ev.duration !== undefined) return Math.round(ev.duration * 1000);
-  if (ev.type === "pass") return 350;
-  if (ev.type === "shot") return 600;
-  if (ev.type === "inbound") return 600;
-  return parseInt(instrDelayEl.value || 800, 10);
 }
 
 function stepInstr(dir) {
@@ -473,7 +472,6 @@ function findPlayer(team, name) {
   return p;
 }
 
-// helper to set a move tween on a player
 function setMoveTween(p, tx, ty, duration) {
   if (!p) return;
   p.move = {
@@ -484,7 +482,6 @@ function setMoveTween(p, tx, ty, duration) {
     tleft: duration || 0.001,
     duration: duration || 0.001,
   };
-  // keep target tx/ty for fallback smoothing as well
   p.tx = tx;
   p.ty = ty;
 }
@@ -526,7 +523,6 @@ function finalizeBallArrival(pending) {
       document.getElementById("homeScore").textContent = game.homeScore;
       document.getElementById("awayScore").textContent = game.awayScore;
       log(`${shooter.name} scored ${pending.points || 2} (instruction)`);
-      // leave ball ground and wait for explicit inbound or next event
       setInboundAfterScore();
     } else {
       log(`${shooter.name} missed (instruction)`);
@@ -549,7 +545,6 @@ function finalizeBallArrival(pending) {
   }
 }
 
-// simple post-score handler so instructions can remain deterministic (inbound events preferred)
 function setInboundAfterScore() {
   game.ball.state = "ground";
   game.ball.holder = null;
@@ -562,7 +557,7 @@ function setInboundAfterScore() {
   game.ball.y = canvas.height / 2;
 }
 
-// main instruction application (no timeouts; uses pendingArrival)
+// main instruction application (uses pendingArrival)
 function applyInstruction(ev, opts = {}) {
   if (!game) return;
   switch (ev.type) {
@@ -620,9 +615,9 @@ function applyInstruction(ev, opts = {}) {
       const p = findPlayer(team, name);
       if (p) {
         if (ev.x !== undefined && ev.y !== undefined) {
-          if (ev.duration && !ev.instant) {
+          if (ev.duration && !ev.instant)
             setMoveTween(p, ev.x, ev.y, ev.duration);
-          } else {
+          else {
             p.tx = ev.x;
             p.ty = ev.y;
             if (ev.instant) {
@@ -630,7 +625,6 @@ function applyInstruction(ev, opts = {}) {
               p.y = p.ty;
               p.move = null;
             } else {
-              // small default tween
               setMoveTween(p, ev.x, ev.y, ev.duration || 0.45);
             }
           }
@@ -655,6 +649,14 @@ function applyInstruction(ev, opts = {}) {
         game.ball.ttl = travel;
         game.ball.pendingArrival = { type: "pass", to: pTo };
         game.ball.holder = null;
+        // optionally nudge receiver position
+        if (ev.to && ev.to.tx !== undefined)
+          setMoveTween(
+            pTo,
+            ev.to.tx,
+            ev.to.ty || pTo.ty,
+            Math.min(travel, ev.to.moveDur || 0.4)
+          );
       }
       break;
     }
@@ -665,7 +667,6 @@ function applyInstruction(ev, opts = {}) {
       if (shooter) {
         const targetX = getOpponentBasketX(shooter.team),
           targetY = getBasketY();
-        // validate three-pointer: if event claims 3 but shooter is inside THREE_PT_DIST, downgrade
         const distToBasket = Math.hypot(
           targetX - shooter.x,
           targetY - shooter.y
@@ -675,10 +676,19 @@ function applyInstruction(ev, opts = {}) {
           points = 2;
           log(`${shooter.name}'s 3-pointer downgraded to 2 (too close)`);
         }
+        // allow short pre-shot move if coordinates provided
+        if (ev.shooter && ev.shooter.tx !== undefined && ev.duration) {
+          setMoveTween(
+            shooter,
+            ev.shooter.tx,
+            ev.shooter.ty || shooter.ty,
+            Math.min(ev.duration, 0.6)
+          );
+        }
         const travel =
           ev.flight ||
           Math.max(
-            0.5,
+            0.45,
             Math.hypot(targetX - shooter.x, targetY - shooter.y) / 420
           );
         game.ball.state = "flying";
@@ -689,16 +699,12 @@ function applyInstruction(ev, opts = {}) {
         game.ball.vy = (targetY - shooter.y) / travel;
         game.ball.ttl = travel;
         game.ball.holder = null;
-        // record pending shot result and rebound info
         game.ball.pendingArrival = {
           type: "shot",
           shooter,
           made: !!ev.made,
-          madeFlag: ev.made,
-          madePoints: points,
-          rebound: ev.rebound,
-          madeWas: ev.made,
           points,
+          rebound: ev.rebound,
         };
       }
       break;
@@ -728,19 +734,15 @@ function applyInstruction(ev, opts = {}) {
       const from = findPlayer(ev.from.team, ev.from.name);
       if (thief && from) {
         const d = Math.hypot(thief.x - from.x, thief.y - from.y);
-        if (d <= STEAL_RADIUS) {
-          finalizeSteal(thief, from);
-        } else {
-          // schedule approach and finalize when close enough
+        if (d <= STEAL_RADIUS) finalizeSteal(thief, from);
+        else {
           game.pendingSteals = game.pendingSteals || [];
-          // avoid duplicate entries
           if (
             !game.pendingSteals.find(
               (ps) => ps.thief === thief && ps.from === from
             )
           ) {
             game.pendingSteals.push({ thief, from });
-            // nudge thief toward the target
             setMoveTween(
               thief,
               from.x,
@@ -813,7 +815,7 @@ function render() {
 
   // HUD
   ctx.fillStyle = "rgba(0,0,0,0.6)";
-  ctx.fillRect(10, 10, 340, 52);
+  ctx.fillRect(10, 10, 360, 56);
   ctx.fillStyle = "#fff";
   ctx.font = "14px sans-serif";
   ctx.fillText(
@@ -832,7 +834,7 @@ function render() {
       game.possessionTime || 0
     )}`,
     canvas.width - 300,
-    34
+    36
   );
 }
 
@@ -882,3 +884,219 @@ function drawCourt() {
 }
 
 drawCourt();
+
+// ----------------- Preprocessing / scheduling helpers -----------------
+
+// Accepts events array (original play-by-play). Returns new instruction list
+// with parsed triggerAt (seconds left) and synthetic passes/moves inserted.
+function preprocessInstructions(orig) {
+  const list = orig.map((e) => ({ ...e })); // shallow clone
+  // parse clock strings into triggerAt (seconds left). Accept "M:SS" or numeric seconds.
+  list.forEach((ev) => {
+    if (ev.clock !== undefined && ev.clock !== null) {
+      ev.triggerAt = parseClock(ev.clock);
+    }
+    // keep any explicit duration/flight as-is
+  });
+
+  // sort descending by triggerAt (clock decreases)
+  list.sort((a, b) => {
+    const A = a.triggerAt !== undefined ? a.triggerAt : -1;
+    const B = b.triggerAt !== undefined ? b.triggerAt : -1;
+    return B - A;
+  });
+
+  // Simulate through events to track who currently holds the ball (approx)
+  let simulatedHolder = null; // {team,name}
+  let simulatedTeam = null;
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    const ev = list[i];
+    // If this is a shot with an assist, insert an assist pass just before the shot
+    if (ev.type === "shot" && ev.assist && ev.triggerAt !== undefined) {
+      // schedule assist pass ~0.6s before shot (or half the gap if next event was earlier)
+      const passTime = Math.max(0, ev.triggerAt + 0.0 - 0.6);
+      const assistEv = {
+        type: "pass",
+        from: { team: ev.assist.team, name: ev.assist.name },
+        to: { team: ev.shooter.team, name: ev.shooter.name },
+        duration: 0.35,
+        generated: true,
+        triggerAt: passTime,
+      };
+      out.push(assistEv);
+      // also schedule a small move for shooter to get into shot position just before shot
+      const preMove = {
+        type: "move",
+        team: ev.shooter.team,
+        name: ev.shooter.name,
+        duration: 0.4,
+        generated: true,
+        // no coordinates — renderer will simply nudge if coordinates provided later
+        triggerAt: Math.max(0, ev.triggerAt + 0.0 - 0.9),
+      };
+      out.push(preMove);
+      simulatedHolder = { team: ev.shooter.team, name: ev.shooter.name };
+      simulatedTeam = ev.shooter.team;
+      out.push(ev);
+      continue;
+    }
+
+    // otherwise, if this event is a rebound/inbound/pass/steal it determines holder
+    if (ev.type === "inbound" && ev.to) {
+      simulatedHolder = { team: ev.to.team, name: ev.to.name };
+      simulatedTeam = ev.to.team;
+      out.push(ev);
+      continue;
+    }
+    if (ev.type === "pass" && ev.to) {
+      simulatedHolder = { team: ev.to.team, name: ev.to.name };
+      simulatedTeam = ev.to.team;
+      out.push(ev);
+      continue;
+    }
+    if (ev.type === "rebound" && ev.name) {
+      simulatedHolder = { team: ev.team, name: ev.name };
+      simulatedTeam = ev.team;
+      out.push(ev);
+      continue;
+    }
+    if (ev.type === "steal" && ev.to) {
+      simulatedHolder = { team: ev.to.team, name: ev.to.name };
+      simulatedTeam = ev.to.team;
+      out.push(ev);
+      continue;
+    }
+    if (ev.type === "shot") {
+      // after a shot, holder becomes null until rebound/inbound unless shot has rebound info
+      if (ev.made) {
+        simulatedHolder = null;
+        simulatedTeam = null;
+      } else if (ev.rebound) {
+        simulatedHolder = { team: ev.rebound.team, name: ev.rebound.name };
+        simulatedTeam = ev.rebound.team;
+      } else {
+        simulatedHolder = null;
+        simulatedTeam = null;
+      }
+      out.push(ev);
+      continue;
+    }
+
+    // For other event types, simply push through
+    out.push(ev);
+  }
+
+  // Now we have 'out' (with assist passes inserted). Next: fill gaps between sequential events
+  // by adding simple move/pass events where helpful.
+  const filled = [];
+  for (let i = 0; i < out.length; i++) {
+    const ev = out[i];
+    filled.push(ev);
+    const next = out[i + 1];
+    if (!next || ev.triggerAt === undefined || next.triggerAt === undefined)
+      continue;
+    const gap = ev.triggerAt - next.triggerAt; // positive if ev earlier than next
+    if (gap > 0.7) {
+      // create a synthetic "move" for upcoming actor to get into position halfway through gap
+      // identify the primary next actor (target shooter, rebounder, or inbound)
+      let actor = null;
+      if (next.type === "shot" && next.shooter) actor = next.shooter;
+      else if (next.type === "rebound" && next.name)
+        actor = { team: next.team, name: next.name };
+      else if (next.type === "inbound" && next.to) actor = next.to;
+      // schedule move at mid-gap
+      if (actor) {
+        const mv = {
+          type: "move",
+          team: actor.team,
+          name: actor.name,
+          duration: Math.min(0.9, gap * 0.6),
+          generated: true,
+          triggerAt: next.triggerAt + gap * 0.5,
+        };
+        filled.push(mv);
+      }
+      // if previous event left a simulated holder and next is same team shot and holder != shooter, insert pass shortly before next
+      // We'll try to infer holder by scanning back for last holder-setting event
+      let lastHolder = null;
+      for (let j = i; j >= 0; j--) {
+        const e2 = filled[j];
+        if (!e2) continue;
+        if (e2.type === "inbound" && e2.to) {
+          lastHolder = e2.to;
+          break;
+        }
+        if (e2.type === "pass" && e2.to) {
+          lastHolder = e2.to;
+          break;
+        }
+        if (e2.type === "rebound" && e2.name) {
+          lastHolder = { team: e2.team, name: e2.name };
+          break;
+        }
+        if (e2.type === "steal" && e2.to) {
+          lastHolder = e2.to;
+          break;
+        }
+        if (e2.type === "shot" && e2.made === false && e2.rebound) {
+          lastHolder = { team: e2.rebound.team, name: e2.rebound.name };
+          break;
+        }
+      }
+      if (
+        lastHolder &&
+        next.type === "shot" &&
+        lastHolder.team === next.shooter.team &&
+        lastHolder.name !== next.shooter.name
+      ) {
+        const passTime = Math.max(next.triggerAt + 0.05, next.triggerAt - 0.45);
+        const synthPass = {
+          type: "pass",
+          from: { team: lastHolder.team, name: lastHolder.name },
+          to: { team: next.shooter.team, name: next.shooter.name },
+          duration: 0.35,
+          generated: true,
+          triggerAt: passTime,
+        };
+        filled.push(synthPass);
+      }
+    }
+  }
+
+  // final sort descending by triggerAt with fallback for items lacking triggerAt (put at end)
+  filled.sort((a, b) => {
+    const A = a.triggerAt !== undefined ? a.triggerAt : -99999;
+    const B = b.triggerAt !== undefined ? b.triggerAt : -99999;
+    return B - A;
+  });
+
+  // normalize index order for runtime (we will apply while clock decreases)
+  return filled;
+}
+
+// parse "M:SS" or numeric seconds into seconds-left number
+function parseClock(s) {
+  if (s === null || s === undefined) return undefined;
+  if (typeof s === "number") return s;
+  if (typeof s === "string") {
+    const m = s.match(/^(\d+):(\d{1,2})(?:\.(\d+))?$/);
+    if (m) {
+      const mins = parseInt(m[1], 10);
+      const secs = parseInt(m[2], 10);
+      const frac = m[3] ? parseFloat("0." + m[3]) : 0;
+      return mins * 60 + secs + frac;
+    }
+    const n = parseFloat(s);
+    if (!isNaN(n)) return n;
+  }
+  return undefined;
+}
+function formatClock(sec) {
+  if (sec === undefined || sec === null) return "0:00";
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60)
+    .toString()
+    .padStart(2, "0");
+  return `${m}:${s}`;
+}
