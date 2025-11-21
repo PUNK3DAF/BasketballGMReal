@@ -1,4 +1,4 @@
-// app.js - Instruction Replay with realistic transitions + clock scheduling
+// app.js - Instruction Replay with realistic transitions + clock scheduling + subs/free throws/etc.
 // Replace your current file with this version.
 
 const fileInput = document.getElementById("fileInput");
@@ -22,11 +22,11 @@ const logEl = document.getElementById("log");
 const canvas = document.getElementById("court");
 const ctx = canvas.getContext("2d");
 
-// --- realistic tuning constants ---
-const PLAYER_BASE_SPEED = 120; // px/sec baseline
-const STEAL_RADIUS = 36; // px
-const STEAL_APPROACH_SPEED = 160; // px/sec when approaching to steal
-const THREE_PT_DIST = 220; // px from basket to be considered a 3-pointer
+// tuning
+const PLAYER_BASE_SPEED = 120;
+const STEAL_RADIUS = 36;
+const STEAL_APPROACH_SPEED = 160;
+const THREE_PT_DIST = 220;
 
 let league = null;
 let teams = [];
@@ -34,8 +34,7 @@ let playersGlobal = [];
 let game = null;
 let animRequest = null;
 
-// Instruction replay state
-let instructions = []; // array of event objects (may include synthetic)
+let instructions = [];
 let instrIndex = 0;
 let instrPlaying = false;
 let instrTimer = null;
@@ -68,11 +67,10 @@ loadInstrBtn.addEventListener("click", async () => {
       log("Instructions file must be a JSON array of events.");
       return;
     }
-    // parse and preprocess (clock parsing, assist pass insertion, gap-filling)
     instructions = preprocessInstructions(data);
     instrIndex = 0;
     log(`Loaded ${instructions.length} instructions (with preprocessing).`);
-    render(); // show initial state
+    render();
   } catch (err) {
     log("Error loading instructions: " + err.message);
   }
@@ -84,7 +82,6 @@ playInstrBtn.addEventListener("click", () => {
     return;
   }
   instrPlaying = true;
-  // if playing by clock, animLoop will dispatch events as time elapses
   if (!game) {
     const home = teams[0],
       away = teams[1];
@@ -131,9 +128,7 @@ speedSlider.addEventListener("input", () => {
 
 modeSelect.addEventListener("change", () => {
   const mode = modeSelect.value;
-  if (mode === "replay") {
-    teamSelectors.style.display = "";
-  }
+  if (mode === "replay") teamSelectors.style.display = "";
 });
 
 function log(s) {
@@ -142,7 +137,7 @@ function log(s) {
   logEl.prepend(p);
 }
 
-// --- parse league and roster ---
+// parse league roster
 function parseLeague(leagueJson) {
   teams = [];
   playersGlobal = leagueJson.players || [];
@@ -209,16 +204,14 @@ function populateTeamSelectors() {
   }
 }
 
-// --- game state and animation ---
+// start game (time derived from instructions if present)
 function startGame(home, away) {
-  // if instructions provide a max clock, start there so events happen as expected
   let startClock = 12 * 60;
   if (instructions && instructions.length) {
     const maxTrigger = Math.max(
       0,
       ...instructions.map((e) => (e.triggerAt !== undefined ? e.triggerAt : 0))
     );
-    // If maxTrigger provided and less than 12*60, keep 12*60; else use maxTrigger
     startClock = Math.max(12 * 60, maxTrigger);
   }
 
@@ -234,7 +227,7 @@ function startGame(home, away) {
       y: canvas.height / 2,
       vx: 0,
       vy: 0,
-      state: "held", // held, flying, ground
+      state: "held",
       holder: null,
       pendingArrival: null,
       ttl: 0,
@@ -315,7 +308,6 @@ function startGame(home, away) {
   animLoop();
 }
 
-// animation loop: always update physics (players + ball)
 function animLoop(t) {
   if (!game) return;
   animRequest = requestAnimationFrame(animLoop);
@@ -325,13 +317,10 @@ function animLoop(t) {
   if (game.paused) return;
   const dt = dtReal * game.speed;
 
-  // decrement game clock so timestamped events can trigger
   game.timeLeft = Math.max(0, game.timeLeft - dt);
 
-  // update players and ball each frame so transitions animate
   updatePhysics(dt);
 
-  // dispatch timed instructions when playing by clock
   if (instrPlaying) dispatchTimedInstructions();
 
   render();
@@ -364,12 +353,11 @@ function updatePhysics(dt) {
     }
   });
 
-  // pending steals approach logic
   if (game.pendingSteals && game.pendingSteals.length) {
     for (let i = game.pendingSteals.length - 1; i >= 0; i--) {
       const ps = game.pendingSteals[i];
-      const thief = ps.thief;
-      const from = ps.from;
+      const thief = ps.thief,
+        from = ps.from;
       if (!thief || !from) {
         game.pendingSteals.splice(i, 1);
         continue;
@@ -390,7 +378,6 @@ function updatePhysics(dt) {
     }
   }
 
-  // update ball flight
   const b = game.ball;
   if (b && b.state === "flying") {
     b.x += b.vx * dt;
@@ -411,18 +398,13 @@ function updatePhysics(dt) {
 
 function dispatchTimedInstructions() {
   if (!instructions || instrIndex >= instructions.length) return;
-  // instructions are sorted descending by triggerAt (seconds left)
-  // Apply all events whose triggerAt >= game.timeLeft (i.e., time has passed to or past that clock)
   while (instrIndex < instructions.length) {
     const ev = instructions[instrIndex];
     if (ev.triggerAt === undefined) {
-      // immediate (no clock) events: apply only if playback requested via step / play
-      // apply now if instrPlaying and no triggerAt
       applyInstruction(ev);
       instrIndex++;
       continue;
     }
-    // If game.timeLeft <= ev.triggerAt then it's time (clock counts down)
     if (game.timeLeft <= ev.triggerAt) {
       applyInstruction(ev);
       instrIndex++;
@@ -457,9 +439,8 @@ function rebuildStateToIndex(index) {
   const home = game.home,
     away = game.away;
   startGame(home, away);
-  for (let i = 0; i < index; i++) {
+  for (let i = 0; i < index; i++)
     applyInstruction(instructions[i], { silent: true });
-  }
 }
 
 function findPlayer(team, name) {
@@ -495,6 +476,7 @@ function finalizeSteal(thief, from) {
   log(`${thief.name} stole the ball (instruction)`);
 }
 
+// finalize arrival handles pass/inbound/shot/freethrow
 function finalizeBallArrival(pending) {
   if (!pending) return;
   if (pending.type === "pass") {
@@ -504,9 +486,7 @@ function finalizeBallArrival(pending) {
       game.ball.holder = pTo;
       game.ball.x = pTo.x + (pTo.team === "home" ? 10 : -10);
       game.ball.y = pTo.y - 8;
-    } else {
-      game.ball.state = "ground";
-    }
+    } else game.ball.state = "ground";
   } else if (pending.type === "inbound") {
     const handler = pending.handler;
     if (handler) {
@@ -523,7 +503,15 @@ function finalizeBallArrival(pending) {
       document.getElementById("homeScore").textContent = game.homeScore;
       document.getElementById("awayScore").textContent = game.awayScore;
       log(`${shooter.name} scored ${pending.points || 2} (instruction)`);
-      setInboundAfterScore();
+      // handle and-one: if pending.andOne === true, schedule a free throw sequence (single FT)
+      if (pending.andOne) {
+        // animate free throw from shooter: create immediate freethrow flight
+        performFreeThrow(
+          shooter,
+          pending.ftMade !== undefined ? !!pending.ftMade : true
+        );
+        return; // freethrow will set inbound/score itself
+      } else setInboundAfterScore();
     } else {
       log(`${shooter.name} missed (instruction)`);
       if (pending.rebound) {
@@ -535,9 +523,34 @@ function finalizeBallArrival(pending) {
           game.offense = rb.team;
           game.ball.x = rb.x + (rb.team === "home" ? 10 : -10);
           game.ball.y = rb.y - 8;
-        } else {
-          game.ball.state = "ground";
-        }
+        } else game.ball.state = "ground";
+      } else game.ball.state = "ground";
+    }
+  } else if (pending.type === "freethrow") {
+    const shooter = pending.shooter;
+    if (pending.made) {
+      if (shooter.team === "home") game.homeScore += 1;
+      else game.awayScore += 1;
+      document.getElementById("homeScore").textContent = game.homeScore;
+      document.getElementById("awayScore").textContent = game.awayScore;
+      log(`${shooter.name} made a free throw`);
+    } else log(`${shooter.name} missed a free throw`);
+    // after free throw, if pending.nextFreethrow true, schedule next; else await next event
+    if (pending.next) {
+      // perform next free throw animation immediately
+      performFreeThrow(pending.shooter, pending.next.made, pending.next);
+    } else {
+      // after last FT, leave ball ground or set rebound if provided
+      if (pending.rebound) {
+        const r = pending.rebound;
+        const rb = findPlayer(r.team, r.name);
+        if (rb) {
+          game.ball.state = "held";
+          game.ball.holder = rb;
+          game.offense = rb.team;
+          game.ball.x = rb.x + (rb.team === "home" ? 10 : -10);
+          game.ball.y = rb.y - 8;
+        } else game.ball.state = "ground";
       } else {
         game.ball.state = "ground";
       }
@@ -545,6 +558,32 @@ function finalizeBallArrival(pending) {
   }
 }
 
+function performFreeThrow(shooter, made = true, opts = {}) {
+  if (!shooter) return;
+  // move shooter to FT spot
+  const ftX = shooter.team === "home" ? canvas.width - 120 : 120;
+  const ftY = canvas.height / 2;
+  setMoveTween(shooter, ftX, ftY, 0.6);
+  // animate ball from shooter to basket
+  const targetX = getOpponentBasketX(shooter.team);
+  const targetY = getBasketY();
+  const travel = 0.8;
+  game.ball.state = "flying";
+  game.ball.flightType = "freethrow";
+  game.ball.vx = (targetX - shooter.x) / travel;
+  game.ball.vy = (targetY - shooter.y) / travel;
+  game.ball.ttl = travel;
+  game.ball.pendingArrival = {
+    type: "freethrow",
+    shooter,
+    made: !!made,
+    next: opts.next,
+    rebound: opts.rebound,
+  };
+  game.ball.holder = null;
+}
+
+// after made basket inbound placement
 function setInboundAfterScore() {
   game.ball.state = "ground";
   game.ball.holder = null;
@@ -557,7 +596,7 @@ function setInboundAfterScore() {
   game.ball.y = canvas.height / 2;
 }
 
-// main instruction application (uses pendingArrival)
+// instruction application (extended)
 function applyInstruction(ev, opts = {}) {
   if (!game) return;
   switch (ev.type) {
@@ -598,9 +637,9 @@ function applyInstruction(ev, opts = {}) {
             setMoveTween(handler, handler.tx, handler.ty, ev.duration);
         }
         const target = { x: handler.tx, y: handler.ty };
+        const travel = ev.duration || 0.6;
         game.ball.state = "flying";
         game.ball.flightType = "inbound";
-        const travel = ev.duration || 0.6;
         game.ball.vx = (target.x - game.ball.x) / travel;
         game.ball.vy = (target.y - game.ball.y) / travel;
         game.ball.ttl = travel;
@@ -613,31 +652,25 @@ function applyInstruction(ev, opts = {}) {
       const team = ev.team,
         name = ev.name;
       const p = findPlayer(team, name);
-      if (p) {
-        if (ev.x !== undefined && ev.y !== undefined) {
-          if (ev.duration && !ev.instant)
-            setMoveTween(p, ev.x, ev.y, ev.duration);
-          else {
-            p.tx = ev.x;
-            p.ty = ev.y;
-            if (ev.instant) {
-              p.x = p.tx;
-              p.y = p.ty;
-              p.move = null;
-            } else {
-              setMoveTween(p, ev.x, ev.y, ev.duration || 0.45);
-            }
-          }
+      if (p && ev.x !== undefined && ev.y !== undefined) {
+        if (ev.duration && !ev.instant)
+          setMoveTween(p, ev.x, ev.y, ev.duration);
+        else {
+          p.tx = ev.x;
+          p.ty = ev.y;
+          if (ev.instant) {
+            p.x = p.tx;
+            p.y = p.ty;
+            p.move = null;
+          } else setMoveTween(p, ev.x, ev.y, ev.duration || 0.45);
         }
       }
       break;
     }
 
     case "pass": {
-      const from = ev.from,
-        to = ev.to;
-      const pFrom = findPlayer(from.team, from.name);
-      const pTo = findPlayer(to.team, to.name);
+      const pFrom = findPlayer(ev.from.team, ev.from.name);
+      const pTo = findPlayer(ev.to.team, ev.to.name);
       if (pFrom && pTo) {
         const travel =
           ev.duration ||
@@ -649,7 +682,6 @@ function applyInstruction(ev, opts = {}) {
         game.ball.ttl = travel;
         game.ball.pendingArrival = { type: "pass", to: pTo };
         game.ball.holder = null;
-        // optionally nudge receiver position
         if (ev.to && ev.to.tx !== undefined)
           setMoveTween(
             pTo,
@@ -662,8 +694,7 @@ function applyInstruction(ev, opts = {}) {
     }
 
     case "shot": {
-      const shooterRef = ev.shooter;
-      const shooter = findPlayer(shooterRef.team, shooterRef.name);
+      const shooter = findPlayer(ev.shooter.team, ev.shooter.name);
       if (shooter) {
         const targetX = getOpponentBasketX(shooter.team),
           targetY = getBasketY();
@@ -676,15 +707,13 @@ function applyInstruction(ev, opts = {}) {
           points = 2;
           log(`${shooter.name}'s 3-pointer downgraded to 2 (too close)`);
         }
-        // allow short pre-shot move if coordinates provided
-        if (ev.shooter && ev.shooter.tx !== undefined && ev.duration) {
+        if (ev.shooter && ev.shooter.tx !== undefined && ev.duration)
           setMoveTween(
             shooter,
             ev.shooter.tx,
             ev.shooter.ty || shooter.ty,
             Math.min(ev.duration, 0.6)
           );
-        }
         const travel =
           ev.flight ||
           Math.max(
@@ -705,17 +734,22 @@ function applyInstruction(ev, opts = {}) {
           made: !!ev.made,
           points,
           rebound: ev.rebound,
+          andOne: !!ev.andOne,
         };
       }
       break;
     }
 
-    case "score":
-      if (ev.team === "home") game.homeScore += ev.points || 2;
-      else game.awayScore += ev.points || 2;
-      document.getElementById("homeScore").textContent = game.homeScore;
-      document.getElementById("awayScore").textContent = game.awayScore;
+    case "freethrow": {
+      // direct freethrow instruction (can be used by BGm export)
+      const shooter = findPlayer(ev.shooter.team, ev.shooter.name);
+      if (shooter)
+        performFreeThrow(shooter, !!ev.made, {
+          next: ev.next,
+          rebound: ev.rebound,
+        });
       break;
+    }
 
     case "rebound": {
       const p = findPlayer(ev.team, ev.name);
@@ -755,6 +789,112 @@ function applyInstruction(ev, opts = {}) {
       break;
     }
 
+    case "sub": {
+      // {type:"sub", team, out: "Name", in: "Name"}
+      const outName = ev.out,
+        inName = ev.in;
+      const outIdx = game.players.findIndex(
+        (p) => p.team === ev.team && p.name === outName
+      );
+      if (outIdx >= 0) {
+        // find in roster for rating if available
+        const teamObj =
+          teams.find((t) => t.id === game[ev.team].id) ||
+          teams.find((t) => t.name === game[ev.team].name);
+        let inRating = 60;
+        if (teamObj && Array.isArray(teamObj.roster)) {
+          const found = teamObj.roster.find((r) => r.name === inName);
+          if (found) inRating = found.rating || inRating;
+        }
+        const outP = game.players[outIdx];
+        const newP = {
+          team: outP.team,
+          name: inName,
+          rating: inRating,
+          x: outP.x,
+          y: outP.y,
+          tx: outP.x,
+          ty: outP.y,
+          move: null,
+        };
+        game.players[outIdx] = newP;
+        log(`Substitution: ${outName} out, ${inName} in (${ev.team})`);
+      }
+      break;
+    }
+
+    case "outOfBounds": {
+      // ev: {type:"outOfBounds", x?, y?, awardedTo?: {team,name}}
+      if (ev.x !== undefined && ev.y !== undefined) {
+        game.ball.x = ev.x;
+        game.ball.y = ev.y;
+      }
+      game.ball.state = "ground";
+      game.ball.holder = null;
+      game.ball.vx = 0;
+      game.ball.vy = 0;
+      if (ev.awardedTo) {
+        const handler = findPlayer(ev.awardedTo.team, ev.awardedTo.name);
+        if (handler) {
+          // schedule immediate inbound to handler
+          setTimeout(() => {
+            applyInstruction(
+              {
+                type: "inbound",
+                to: { team: handler.team, name: handler.name },
+                duration: 0.6,
+              },
+              {}
+            );
+          }, 120);
+        }
+      }
+      log("Ball out of bounds");
+      break;
+    }
+
+    case "timeout": {
+      // ev: {type:"timeout", team, handlerName?}
+      const team = ev.team;
+      // move team to opponent half and place ball with handler near opponent half
+      const handler = ev.handlerName
+        ? findPlayer(team, ev.handlerName)
+        : game.players.find((p) => p.team === team);
+      if (handler) {
+        const oppHalfX =
+          handler.team === "home" ? canvas.width * 0.65 : canvas.width * 0.35;
+        // nudge all team players into attacking half
+        game.players
+          .filter((p) => p.team === team)
+          .forEach((p, idx) => {
+            const offsetY = (idx - 2) * 40;
+            setMoveTween(
+              p,
+              oppHalfX + (idx % 2 ? 30 : -30),
+              canvas.height / 2 + offsetY,
+              0.8
+            );
+          });
+        // give ball to handler placed near oppHalfX
+        setTimeout(() => {
+          handler.x = oppHalfX + 10;
+          handler.y = canvas.height / 2;
+          handler.tx = handler.x;
+          handler.ty = handler.y;
+          game.ball.state = "held";
+          game.ball.holder = handler;
+          game.offense = team;
+        }, 850);
+      }
+      log(`Timeout (${team})`);
+      break;
+    }
+
+    case "offensiveFoul":
+      // intentionally ignored per request (no offensive fouls)
+      log("Offensive foul ignored (instruction)");
+      break;
+
     case "setScore":
       game.homeScore = ev.home || 0;
       game.awayScore = ev.away || 0;
@@ -769,7 +909,6 @@ function applyInstruction(ev, opts = {}) {
   if (!opts.silent) render();
 }
 
-// ---------------- helpers reused ----------------
 function getOpponentBasketX(team) {
   return team === "home" ? canvas.width - 30 : 30;
 }
@@ -777,14 +916,11 @@ function getBasketY() {
   return canvas.height / 2;
 }
 
-// ---------------- rendering ----------------
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   drawCourt();
-
   if (!game) return;
 
-  // players
   game.players.forEach((p) => {
     ctx.beginPath();
     ctx.fillStyle = p.team === "home" ? "#1e90ff" : "#ff4500";
@@ -798,13 +934,11 @@ function render() {
     ctx.fillText((p.name || "").split(" ")[0], p.x, p.y + 4);
   });
 
-  // ball
   if (game.ball) {
-    if (game.ball.state === "held" && game.ball.holder) {
-      game.ball.x =
-        game.ball.holder.x + (game.ball.holder.team === "home" ? 10 : -10);
-      game.ball.y = game.ball.holder.y - 8;
-    }
+    if (game.ball.state === "held" && game.ball.holder)
+      (game.ball.x =
+        game.ball.holder.x + (game.ball.holder.team === "home" ? 10 : -10)),
+        (game.ball.y = game.ball.holder.y - 8);
     ctx.beginPath();
     ctx.fillStyle = "#e09b2c";
     ctx.arc(game.ball.x, game.ball.y, 6, 0, Math.PI * 2);
@@ -813,7 +947,6 @@ function render() {
     ctx.stroke();
   }
 
-  // HUD
   ctx.fillStyle = "rgba(0,0,0,0.6)";
   ctx.fillRect(10, 10, 360, 56);
   ctx.fillStyle = "#fff";
@@ -885,37 +1018,25 @@ function drawCourt() {
 
 drawCourt();
 
-// ----------------- Preprocessing / scheduling helpers -----------------
-
-// Accepts events array (original play-by-play). Returns new instruction list
-// with parsed triggerAt (seconds left) and synthetic passes/moves inserted.
+// Preprocessing and scheduling helpers
 function preprocessInstructions(orig) {
-  const list = orig.map((e) => ({ ...e })); // shallow clone
-  // parse clock strings into triggerAt (seconds left). Accept "M:SS" or numeric seconds.
+  const list = orig.map((e) => ({ ...e }));
   list.forEach((ev) => {
-    if (ev.clock !== undefined && ev.clock !== null) {
+    if (ev.clock !== undefined && ev.clock !== null)
       ev.triggerAt = parseClock(ev.clock);
-    }
-    // keep any explicit duration/flight as-is
   });
-
-  // sort descending by triggerAt (clock decreases)
   list.sort((a, b) => {
     const A = a.triggerAt !== undefined ? a.triggerAt : -1;
     const B = b.triggerAt !== undefined ? b.triggerAt : -1;
     return B - A;
   });
 
-  // Simulate through events to track who currently holds the ball (approx)
-  let simulatedHolder = null; // {team,name}
-  let simulatedTeam = null;
   const out = [];
   for (let i = 0; i < list.length; i++) {
     const ev = list[i];
-    // If this is a shot with an assist, insert an assist pass just before the shot
+    // shot with assist -> insert pass + move prior
     if (ev.type === "shot" && ev.assist && ev.triggerAt !== undefined) {
-      // schedule assist pass ~0.6s before shot (or half the gap if next event was earlier)
-      const passTime = Math.max(0, ev.triggerAt + 0.0 - 0.6);
+      const passTime = Math.max(0, ev.triggerAt - 0.6);
       const assistEv = {
         type: "pass",
         from: { team: ev.assist.team, name: ev.assist.name },
@@ -925,70 +1046,22 @@ function preprocessInstructions(orig) {
         triggerAt: passTime,
       };
       out.push(assistEv);
-      // also schedule a small move for shooter to get into shot position just before shot
       const preMove = {
         type: "move",
         team: ev.shooter.team,
         name: ev.shooter.name,
         duration: 0.4,
         generated: true,
-        // no coordinates — renderer will simply nudge if coordinates provided later
-        triggerAt: Math.max(0, ev.triggerAt + 0.0 - 0.9),
+        triggerAt: Math.max(0, ev.triggerAt - 0.9),
       };
       out.push(preMove);
-      simulatedHolder = { team: ev.shooter.team, name: ev.shooter.name };
-      simulatedTeam = ev.shooter.team;
       out.push(ev);
       continue;
     }
-
-    // otherwise, if this event is a rebound/inbound/pass/steal it determines holder
-    if (ev.type === "inbound" && ev.to) {
-      simulatedHolder = { team: ev.to.team, name: ev.to.name };
-      simulatedTeam = ev.to.team;
-      out.push(ev);
-      continue;
-    }
-    if (ev.type === "pass" && ev.to) {
-      simulatedHolder = { team: ev.to.team, name: ev.to.name };
-      simulatedTeam = ev.to.team;
-      out.push(ev);
-      continue;
-    }
-    if (ev.type === "rebound" && ev.name) {
-      simulatedHolder = { team: ev.team, name: ev.name };
-      simulatedTeam = ev.team;
-      out.push(ev);
-      continue;
-    }
-    if (ev.type === "steal" && ev.to) {
-      simulatedHolder = { team: ev.to.team, name: ev.to.name };
-      simulatedTeam = ev.to.team;
-      out.push(ev);
-      continue;
-    }
-    if (ev.type === "shot") {
-      // after a shot, holder becomes null until rebound/inbound unless shot has rebound info
-      if (ev.made) {
-        simulatedHolder = null;
-        simulatedTeam = null;
-      } else if (ev.rebound) {
-        simulatedHolder = { team: ev.rebound.team, name: ev.rebound.name };
-        simulatedTeam = ev.rebound.team;
-      } else {
-        simulatedHolder = null;
-        simulatedTeam = null;
-      }
-      out.push(ev);
-      continue;
-    }
-
-    // For other event types, simply push through
     out.push(ev);
   }
 
-  // Now we have 'out' (with assist passes inserted). Next: fill gaps between sequential events
-  // by adding simple move/pass events where helpful.
+  // fill gaps with moves/passes and inject freethrow sequence where shot.andOne
   const filled = [];
   for (let i = 0; i < out.length; i++) {
     const ev = out[i];
@@ -996,16 +1069,13 @@ function preprocessInstructions(orig) {
     const next = out[i + 1];
     if (!next || ev.triggerAt === undefined || next.triggerAt === undefined)
       continue;
-    const gap = ev.triggerAt - next.triggerAt; // positive if ev earlier than next
+    const gap = ev.triggerAt - next.triggerAt;
     if (gap > 0.7) {
-      // create a synthetic "move" for upcoming actor to get into position halfway through gap
-      // identify the primary next actor (target shooter, rebounder, or inbound)
       let actor = null;
       if (next.type === "shot" && next.shooter) actor = next.shooter;
       else if (next.type === "rebound" && next.name)
         actor = { team: next.team, name: next.name };
       else if (next.type === "inbound" && next.to) actor = next.to;
-      // schedule move at mid-gap
       if (actor) {
         const mv = {
           type: "move",
@@ -1017,8 +1087,7 @@ function preprocessInstructions(orig) {
         };
         filled.push(mv);
       }
-      // if previous event left a simulated holder and next is same team shot and holder != shooter, insert pass shortly before next
-      // We'll try to infer holder by scanning back for last holder-setting event
+      // infer last holder
       let lastHolder = null;
       for (let j = i; j >= 0; j--) {
         const e2 = filled[j];
@@ -1064,18 +1133,36 @@ function preprocessInstructions(orig) {
     }
   }
 
-  // final sort descending by triggerAt with fallback for items lacking triggerAt (put at end)
-  filled.sort((a, b) => {
+  // handle shot.andOne by injecting a freethrow event after shot if requested
+  const finalList = [];
+  for (let i = 0; i < filled.length; i++) {
+    const ev = filled[i];
+    finalList.push(ev);
+    if (ev.type === "shot" && ev.andOne) {
+      // insert synthetic freethrow immediately after (slightly later)
+      const ft = {
+        type: "freethrow",
+        shooter: ev.shooter,
+        made: ev.ftMade !== undefined ? ev.ftMade : true,
+        generated: true,
+        triggerAt: Math.max(
+          0,
+          ev.triggerAt !== undefined ? ev.triggerAt - 0.2 : undefined
+        ),
+      };
+      finalList.push(ft);
+    }
+  }
+
+  finalList.sort((a, b) => {
     const A = a.triggerAt !== undefined ? a.triggerAt : -99999;
     const B = b.triggerAt !== undefined ? b.triggerAt : -99999;
     return B - A;
   });
 
-  // normalize index order for runtime (we will apply while clock decreases)
-  return filled;
+  return finalList;
 }
 
-// parse "M:SS" or numeric seconds into seconds-left number
 function parseClock(s) {
   if (s === null || s === undefined) return undefined;
   if (typeof s === "number") return s;
