@@ -31,6 +31,11 @@ const STEAL_RADIUS = 36;
 const STEAL_APPROACH_SPEED = 160;
 const THREE_PT_DIST = 220;
 
+const DEBUG_LOG = false;
+function logDebug(s) {
+  if (DEBUG_LOG) log(s);
+}
+
 // approach/anticipation
 const APPROACH_THRESHOLD = 3.5; // seconds before an event to begin approach
 const IDLE_MOVE_RADIUS = 28; // px for small idle wandering
@@ -308,7 +313,7 @@ function startGame(home, away) {
     typeof r === "string" ? { name: r } : { ...r }
   );
 
-  // prefer playersGlobal if it provides lineups
+  // prefer playersGlobal lineups if available
   try {
     const homeFromGlobal = (playersGlobal || [])
       .filter((p) => p.team === "home")
@@ -356,6 +361,7 @@ function startGame(home, away) {
     currentPlay: null,
     pendingSteals: [],
     repositionTimer: 0.6,
+    preparedInstrIndex: null,
   };
 
   function chooseFive(roster, prefix) {
@@ -424,22 +430,20 @@ function startGame(home, away) {
   document.getElementById("awayScore").textContent = String(game.awayScore);
 
   log(
-    `Game started with rosters: Home[${game.players
-      .filter((p) => p.team === "home")
-      .map((p) => p.name)
-      .join(", ")}] Away[${game.players
-      .filter((p) => p.team === "away")
-      .map((p) => p.name)
-      .join(", ")}] at ${formatClock(game.timeLeft)}.`
+    `Game started: Home roster: ${home.roster
+      .slice(0, 5)
+      .map((r) => r.name)
+      .join(", ")} | Away roster: ${away.roster
+      .slice(0, 5)
+      .map((r) => r.name)
+      .join(", ")}`
   );
 
   if (animRequest) cancelAnimationFrame(animRequest);
   game.lastUpdate = performance.now();
-  // initial formation
   setTeamAttackPositions(game.offense);
   animLoop();
 }
-
 // animation loop: always update physics (players + ball)
 function animLoop(t) {
   if (!game) return;
@@ -592,6 +596,9 @@ function prepareForNextInstruction() {
   if (!(timeToEvent > 0 && timeToEvent <= Math.max(APPROACH_THRESHOLD, 0.5)))
     return;
 
+  // prevent repeated re-preparation every frame for same instruction
+  if (game.preparedInstrIndex === instrIndex) return;
+
   let offenseTeam = null;
   let shooterName = null;
   if (ev.type === "inbound") offenseTeam = ev.to && ev.to.team;
@@ -624,7 +631,7 @@ function prepareForNextInstruction() {
         const isThree = ev.points === 3;
         const approach = isThree ? 180 : 100;
         const desiredX =
-          p.team === "home"
+          rimX > midX
             ? clamp(rimX - approach, midX + 20, canvas.width - 40)
             : clamp(rimX + approach, 40, midX - 20);
         targetX = desiredX;
@@ -685,8 +692,10 @@ function prepareForNextInstruction() {
       setMoveTween(p, targetX, targetY, dur);
     }
   });
-  log(
-    `Preparing for event ${ev.type} @${formatClock(
+
+  game.preparedInstrIndex = instrIndex;
+  logDebug(
+    `Prepared for event ${ev.type} @${formatClock(
       ev.triggerAt
     )} offense=${offenseTeam}${shooterName ? " shooter=" + shooterName : ""}`
   );
@@ -710,6 +719,8 @@ function advanceInstr() {
   const ev = instructions[instrIndex];
   applyInstruction(ev);
   instrIndex++;
+  // clear preparation so next instruction can prepare
+  if (game) game.preparedInstrIndex = null;
   if (instrPlaying && instrIndex < instructions.length) {
     const delay = evtDelay(ev) || parseInt(instrDelayEl.value || 800, 10);
     instrTimer = setTimeout(advanceInstr, delay);
@@ -800,7 +811,7 @@ function setMoveTween(p, tx, ty, duration) {
   p.move = { sx: p.x, sy: p.y, tx: tx, ty: ty, tleft: dur, duration: dur };
   p.tx = tx;
   p.ty = ty;
-  log(
+  logDebug(
     `MoveTween: ${p.name} -> (${Math.round(tx)},${Math.round(
       ty
     )}) dur=${dur.toFixed(2)}`
@@ -1322,15 +1333,16 @@ function render() {
   const hudX = Math.round((canvas.width - hudW) / 2);
   ctx.fillStyle = "rgba(0,0,0,0.6)";
   ctx.fillRect(hudX, 10, hudW, 52);
+
   ctx.fillStyle = "#fff";
   ctx.font = "14px sans-serif";
-  ctx.fillText(
-    `${game.home.name} ${game.homeScore}  -  ${game.awayScore} ${game.away.name}`,
-    hudX + 12,
-    36
-  );
+  ctx.textAlign = "center";
+  const scoreText = `${game.home.name} ${game.homeScore}  -  ${game.awayScore} ${game.away.name}`;
+  ctx.fillText(scoreText, hudX + hudW / 2, 36);
+
   ctx.fillStyle = "#000";
   ctx.font = "12px monospace";
+  ctx.textAlign = "right";
   const minutes = Math.floor(game.timeLeft / 60);
   const seconds = Math.floor(game.timeLeft % 60)
     .toString()
@@ -1339,7 +1351,7 @@ function render() {
     `Q${game.period}  ${minutes}:${seconds}   Shot: ${Math.ceil(
       game.possessionTime || 0
     )}`,
-    hudX + hudW - 160,
+    hudX + hudW - 8,
     34
   );
 }
@@ -1620,7 +1632,6 @@ function setTeamAttackPositions(offenseTeam) {
   const attackDepth = 120;
   const yOffsets = [-100, -40, 40, 100, 0];
 
-  // precompute offense targets for spacing
   const offenseTargets = [];
   for (let i = 0; i < 5; i++) {
     const y = clamp(
@@ -1637,10 +1648,12 @@ function setTeamAttackPositions(offenseTeam) {
 
     if (offenseTeam && p.team === offenseTeam) {
       const rimX = getOpponentBasketX(p.team);
-      const toward = p.team === "home" ? -1 : 1;
-      const baseX = Math.round(midX + toward * attackDepth);
+      const desiredX =
+        rimX > midX
+          ? clamp(rimX - attackDepth, midX + 20, canvas.width - margin)
+          : clamp(rimX + attackDepth, margin, midX - 20);
       const stagger = (idx - 2) * 30;
-      tx = clamp(baseX + stagger, margin, canvas.width - margin);
+      tx = clamp(desiredX + stagger, margin, canvas.width - margin);
       ty = offenseTargets[idx].offsetY;
     } else if (offenseTeam) {
       const defendBaseX =
@@ -1670,5 +1683,5 @@ function setTeamAttackPositions(offenseTeam) {
       setMoveTween(p, tx, ty, travel);
     }
   });
-  log(`Formation set for offense=${offenseTeam}`);
+  logDebug(`Formation set for offense=${offenseTeam}`);
 }
