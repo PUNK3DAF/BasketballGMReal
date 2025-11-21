@@ -452,137 +452,63 @@ function prepareForNextInstruction() {
   const ev = instructions[instrIndex];
   if (!ev || ev.triggerAt === undefined) return;
   const timeToEvent = game.timeLeft - ev.triggerAt;
-  if (timeToEvent > 0 && timeToEvent <= APPROACH_THRESHOLD) {
-    // only run once per event — mark a flag
-    if (ev._prepared) return;
-    ev._prepared = true;
+  if (timeToEvent > 0 && timeToEvent <= Math.max(APPROACH_THRESHOLD, 0.5)) {
+    // determine which team will be on offense for the upcoming event
+    let offenseTeam = null;
+    if (ev.type === "inbound") offenseTeam = ev.to && ev.to.team;
+    else if (
+      ev.type === "pass" ||
+      ev.type === "shot" ||
+      ev.type === "freethrow"
+    ) {
+      offenseTeam =
+        (ev.from && ev.from.team) ||
+        (ev.shooter && ev.shooter.team) ||
+        (ev.to && ev.to.team);
+    } else if (ev.type === "rebound") offenseTeam = ev.team;
+    else if (ev.type === "steal") offenseTeam = ev.to && ev.to.team;
+    else if (ev.type === "outOfBounds" && ev.awardedTo)
+      offenseTeam = ev.awardedTo.team;
 
-    // For a shot: move shooter toward shooting spot and spread teammates into simple offensive positions
-    if (ev.type === "shot" && ev.shooter) {
-      const shooter = findPlayer(ev.shooter.team, ev.shooter.name);
-      if (shooter) {
-        // move shooter closer to basket a bit
-        const basketX = getOpponentBasketX(shooter.team);
-        const basketY = getBasketY();
-        // choose a shot spot roughly between current position and basket
-        const tx = shooter.x + (basketX - shooter.x) * 0.55;
-        const ty = shooter.y + (basketY - shooter.y) * 0.2;
-        setMoveTween(
-          shooter,
-          tx,
-          ty,
-          Math.min(1.0, Math.max(0.4, timeToEvent * 0.9))
-        );
+    // set target positions: offense moves into attack positions, defense marks them
+    const attackX = (team) => {
+      // X toward opponent basket but not right on top
+      const base = getOpponentBasketX(team);
+      const dir = team === "home" ? -1 : 1; // approach from own half toward basket
+      const offset = 120;
+      return base + dir * offset;
+    };
+
+    // assign basic spots for 5 players: stagger vertically around center
+    const centerY = canvas.height / 2;
+    const offsets = [-120, -40, 40, 120, 0];
+    game.players.forEach((p, idx) => {
+      const target = { x: p.tx, y: p.ty };
+      if (offenseTeam && p.team === offenseTeam) {
+        // offense: move toward attackX and spaced vertically
+        const idxSpot = offsets[idx % offsets.length];
+        target.x = attackX(p.team);
+        target.y = centerY + idxSpot + idx * 6;
+      } else if (offenseTeam) {
+        // defense: mark opponent positions (mirror offense spacing)
+        const mirrorX =
+          getOpponentBasketX(p.team) + (p.team === "home" ? -80 : 80);
+        const idxSpot = offsets[idx % offsets.length];
+        target.x = mirrorX;
+        target.y = centerY + idxSpot + idx * -6;
+      } else {
+        // no clear offense: mild reposition to halfcourt triangles
+        target.x = canvas.width / 2 + (p.team === "home" ? -80 : 80);
+        target.y = centerY + offsets[idx % offsets.length];
       }
-      // nudge teammates to offensive spacing
-      const teamPlayers = game.players.filter(
-        (p) => p.team === ev.shooter.team && p.name !== ev.shooter.name
-      );
-      teamPlayers.forEach((p, idx) => {
-        const side = idx % 2 ? 1 : -1;
-        const tx = Math.max(80, Math.min(canvas.width - 80, p.x + side * 60));
-        const ty = Math.max(
-          60,
-          Math.min(canvas.height - 60, canvas.height / 2 + (idx - 2) * 36)
-        );
-        setMoveTween(
-          p,
-          tx,
-          ty,
-          Math.min(1.2, Math.max(0.5, timeToEvent * 0.8))
-        );
-      });
-    }
-
-    // For inbound: move handler to inbound catch location and opponent defenders to contest area
-    if (ev.type === "inbound" && ev.to) {
-      const handler = findPlayer(ev.to.team, ev.to.name);
-      if (handler) {
-        // place handler near sideline inbound spot (simple heuristic)
-        const inboundX =
-          handler.team === "home" ? canvas.width * 0.15 : canvas.width * 0.85;
-        const inboundY = canvas.height / 2;
-        setMoveTween(
-          handler,
-          inboundX,
-          inboundY,
-          Math.min(1.0, Math.max(0.4, timeToEvent))
-        );
-      }
-      // defenders move toward handler
-      const defenderTeam = ev.to.team === "home" ? "away" : "home";
-      game.players
-        .filter((p) => p.team === defenderTeam)
-        .forEach((d, idx) => {
-          setMoveTween(
-            d,
-            Math.max(40, Math.min(canvas.width - 40, (idx + 1) * 90)),
-            canvas.height / 2 + (idx - 2) * 30,
-            Math.min(1.0, timeToEvent)
-          );
-        });
-    }
-
-    // For rebound events: move likely rebounders toward rim
-    if (ev.type === "rebound") {
-      const candidates = game.players.filter((p) => p.team === ev.team);
-      candidates.forEach((p, idx) => {
-        const rimX = ev.team === "home" ? canvas.width - 60 : 60;
-        const rimY = canvas.height / 2 + (idx - 2) * 18;
-        setMoveTween(
-          p,
-          rimX + (Math.random() - 0.5) * 40,
-          rimY,
-          Math.min(1.0, Math.max(0.4, timeToEvent))
-        );
-      });
-    }
-
-    // For timeout/inbound/outOfBounds: nudge the awarded handler into position (if given)
-    if (ev.type === "outOfBounds" && ev.awardedTo) {
-      const handler = findPlayer(ev.awardedTo.team, ev.awardedTo.name);
-      if (handler)
-        setMoveTween(
-          handler,
-          Math.max(80, Math.min(canvas.width - 80, handler.x)),
-          handler.y - 20,
-          Math.min(1.0, Math.max(0.3, timeToEvent))
-        );
-    }
-
-    // For steals: nudge the thief towards the from player
-    if (ev.type === "steal" && ev.to && ev.from) {
-      const thief = findPlayer(ev.to.team, ev.to.name);
-      const from = findPlayer(ev.from.team, ev.from.name);
-      if (thief && from)
-        setMoveTween(
-          thief,
-          from.x,
-          from.y,
-          Math.min(0.9, Math.max(0.3, timeToEvent))
-        );
-    }
-
-    // for subs, just move the incoming player to the out player's spot
-    if (ev.type === "sub" && ev.team && ev.in && ev.out) {
-      const outP = game.players.find(
-        (p) => p.team === ev.team && p.name === ev.out
-      );
-      const inRoster =
-        teams.find((t) => t.id === game[ev.team].id) ||
-        teams.find((t) => t.name === game[ev.team].name);
-      // we will place incoming at out player's spot when sub occurs; we can nudge roster bench area
-      const benchX = ev.team === game.home.id ? 40 : canvas.width - 40;
-      const benchY = canvas.height - 80;
-      const inP = findPlayer(ev.team, ev.in);
-      if (inP)
-        setMoveTween(
-          inP,
-          benchX + (Math.random() - 0.5) * 20,
-          benchY + (Math.random() - 0.5) * 18,
-          Math.min(1.0, timeToEvent)
-        );
-    }
+      // duration scales with distance and timeToEvent (give them enough time)
+      const dx = target.x - p.x;
+      const dy = target.y - p.y;
+      const dist = Math.hypot(dx, dy);
+      const desiredTime = Math.max(0.35, Math.min(1.4, timeToEvent * 0.9));
+      const dur = Math.max(0.25, Math.min(desiredTime, dist / 220));
+      setMoveTween(p, target.x, target.y, dur);
+    });
   }
 }
 
@@ -918,46 +844,49 @@ function applyInstruction(ev, opts = {}) {
     case "shot": {
       const shooter = findPlayer(ev.shooter.team, ev.shooter.name);
       if (shooter) {
-        const targetX = getOpponentBasketX(shooter.team),
-          targetY = getBasketY();
-        const distToBasket = Math.hypot(
-          targetX - shooter.x,
-          targetY - shooter.y
+        // pick a shooting X on the attacking side (closer to opponent basket)
+        const basketX = getOpponentBasketX(shooter.team);
+        const isThree = ev.points === 3;
+        // 3pt further back, 2pt closer
+        const shootOffset = isThree ? 200 : 110;
+        const shootX =
+          shooter.team === "home"
+            ? Math.min(basketX - 40, basketX - shootOffset)
+            : Math.max(basketX + 40, basketX + shootOffset);
+        const shootY = canvas.height / 2 + (Math.random() * 80 - 40);
+        // move shooter into shooting spot quickly (duration based on time to event)
+        const timeToEvent = game.timeLeft - ev.triggerAt;
+        const moveDur = Math.max(
+          0.18,
+          Math.min(
+            0.9,
+            timeToEvent > 0 ? Math.max(0.25, timeToEvent * 0.6) : 0.35
+          )
         );
-        let points = ev.points || 2;
-        if (points === 3 && distToBasket < THREE_PT_DIST) {
-          points = 2;
-          log(`${shooter.name}'s 3-pointer downgraded to 2 (too close)`);
-        }
-        if (ev.shooter && ev.shooter.tx !== undefined && ev.duration)
-          setMoveTween(
-            shooter,
-            ev.shooter.tx,
-            ev.shooter.ty || shooter.ty,
-            Math.min(ev.duration, 0.6)
-          );
-        const travel =
-          ev.flight ||
-          Math.max(
-            0.45,
-            Math.hypot(targetX - shooter.x, targetY - shooter.y) / 420
-          );
+        setMoveTween(shooter, shootX, shootY, moveDur);
+        // schedule ball flight after a short delay (evtDelay controls)
+        const travel = ev.travel || 0.7;
         game.ball.state = "flying";
         game.ball.flightType = "shot";
-        game.ball.shooter = shooter;
-        game.ball.shootTarget = { x: targetX, y: targetY };
+        // compute vx/vy from shooter current pos (will be updated next frame) to basket
+        const targetX = getOpponentBasketX(shooter.team);
+        const targetY = getBasketY();
         game.ball.vx = (targetX - shooter.x) / travel;
         game.ball.vy = (targetY - shooter.y) / travel;
         game.ball.ttl = travel;
-        game.ball.holder = null;
         game.ball.pendingArrival = {
           type: "shot",
           shooter,
           made: !!ev.made,
-          points,
-          rebound: ev.rebound,
-          andOne: !!ev.andOne,
+          points: ev.points,
+          assist: ev.assist,
         };
+        game.ball.holder = null;
+        log(
+          `${shooter.name} shoots (${ev.points}) at ${ev.clock} - ${
+            ev.made ? "made" : "missed"
+          }`
+        );
       }
       break;
     }
@@ -1243,44 +1172,72 @@ drawCourt();
 // preprocess: parse clock -> triggerAt, auto-insert passes (when possession known),
 // insert small move fillers only, and handle freethrow for and-ones.
 function preprocessInstructions(orig) {
-  const list = orig.map((e) => ({ ...e }));
-  // parse clocks into triggerAt (seconds left)
-  list.forEach((ev) => {
-    if (ev.clock !== undefined) {
-      ev.triggerAt = parseClock(ev.clock);
+  // accept instructions that include a 'lineups' entry (home/away arrays)
+  let list = orig.map((e) => ({ ...e }));
+  // extract lineup instruction if present
+  const lineupIndex = list.findIndex(
+    (e) => e && (e.type === "lineups" || e.type === "lineup")
+  );
+  if (lineupIndex !== -1) {
+    const lu = list.splice(lineupIndex, 1)[0];
+    // build playersGlobal from provided lineups (flatten home+away arrays)
+    playersGlobal = [];
+    if (lu.home && Array.isArray(lu.home)) {
+      lu.home.forEach((p) => playersGlobal.push({ ...p, team: "home" }));
     }
+    if (lu.away && Array.isArray(lu.away)) {
+      lu.away.forEach((p) => playersGlobal.push({ ...p, team: "away" }));
+    }
+    // populate minimal teams array so UI can start without league.json
+    if (!teams.length) {
+      teams = [
+        {
+          id: "home",
+          name: "Home",
+          roster: (lu.home || []).map((n) =>
+            typeof n === "string" ? { name: n } : n
+          ),
+        },
+        {
+          id: "away",
+          name: "Away",
+          roster: (lu.away || []).map((n) =>
+            typeof n === "string" ? { name: n } : n
+          ),
+        },
+      ];
+      populateTeamSelectors();
+    }
+  }
+
+  // parse clocks into triggerAt
+  list.forEach((ev) => {
+    if (ev.clock !== undefined) ev.triggerAt = parseClock(ev.clock);
   });
 
   // sort descending (clock counts down)
   list.sort((a, b) => (b.triggerAt || 0) - (a.triggerAt || 0));
 
-  // helper to choose a teammate from roster (playersGlobal must be loaded)
+  // helper: choose teammate name from playersGlobal for a team
   function chooseTeammate(team, excludeName) {
-    if (!playersGlobal || !playersGlobal.length) {
-      // fallback generic name
-      return excludeName === "Player1" ? "Player2" : "Player1";
-    }
-    const pool = playersGlobal.filter((p) => p.team === team);
-    if (!pool.length) return excludeName || pool[0]?.name || "Player";
-    let pick = pool[Math.floor(Math.random() * pool.length)].name;
-    if (excludeName && pool.some((p) => p.name === excludeName)) {
-      // try to avoid returning the excluded name
-      const alt = pool.find((p) => p.name !== excludeName);
-      if (alt) pick = alt.name;
-    }
-    return pick;
+    const pool = playersGlobal
+      .filter((p) => p.team === team)
+      .map((x) => x.name);
+    if (!pool.length) return excludeName ? excludeName + "_alt" : "Player";
+    let choices = pool.filter((n) => n !== excludeName);
+    if (!choices.length) choices = pool;
+    return choices[Math.floor(Math.random() * choices.length)];
   }
 
   const filled = [];
   let currentPossession = undefined;
   let currentHolder = undefined;
 
-  // iterate through events in chronological order (descending triggerAt)
   for (let i = 0; i < list.length; i++) {
     const ev = list[i];
     filled.push(ev);
 
-    // update possession/holder immediately after this event
+    // update possession/holder based on explicit events
     switch (ev.type) {
       case "inbound":
         currentPossession = ev.to && ev.to.team;
@@ -1305,81 +1262,68 @@ function preprocessInstructions(orig) {
         }
         break;
       case "shot":
-        // if made, possession turns to opponent and no immediate holder
         if (ev.made) {
           currentPossession = currentPossession === "home" ? "away" : "home";
           currentHolder = null;
         } else {
-          // missed shot: leave possession as-is; if a rebound event follows it will update
           currentHolder = null;
         }
         break;
       case "freethrow":
-        // freethrow shooter holds ball for the attempt
         if (ev.shooter) {
           currentPossession = ev.shooter.team;
           currentHolder = ev.shooter.name;
         }
         break;
-      case "timeout":
-      case "sub":
-      case "setScore":
-        // do not change possession by default
-        break;
       default:
         break;
     }
 
-    // compute gap to next event (we'll insert passes after 'ev' and before nextEvent)
+    // synthesize passes between this event and next if possession known
     const next = list[i + 1];
     if (!next || currentPossession === undefined) continue;
-    if (ev.type === "pass") continue; // don't create extra passes immediately after an explicit pass
+    if (ev.type === "pass" || ev.type === "steal" || ev.type === "inbound")
+      continue;
 
     const tStart = ev.triggerAt || 0;
     const tEnd = next.triggerAt !== undefined ? next.triggerAt : 0;
     let gap = tStart - tEnd;
-    // only insert passes when there's a meaningful gap
     if (gap <= 0.5) continue;
 
-    const passInterval = 1.2; // seconds between synthetic passes
-    // start inserting at t = tStart - passInterval, then tStart - 2*passInterval, ...
-    const passTimes = [];
+    const passInterval = 1.25; // tunable
     let t = tStart - passInterval;
-    while (t > tEnd + 0.1) {
-      passTimes.push(t);
-      t -= passInterval;
-      // safety limit
-      if (passTimes.length > 10) break;
-    }
-    // insert passes in chronological order (descending triggerAt), i.e., immediately after current ev
-    for (let pt of passTimes) {
+    const syntheticPasses = [];
+    let safety = 0;
+    while (t > tEnd + 0.05 && safety++ < 12) {
       const fromName = currentHolder || chooseTeammate(currentPossession);
       const toName = chooseTeammate(currentPossession, fromName);
       const passEv = {
         type: "pass",
         from: { team: currentPossession, name: fromName },
         to: { team: currentPossession, name: toName },
-        clock: formatClock(pt),
-        triggerAt: pt,
+        clock: formatClock(t),
+        triggerAt: t,
         synthetic: true,
       };
-      filled.push(passEv);
-      // update holder so next synthetic pass goes from the receiver
+      syntheticPasses.push(passEv);
       currentHolder = toName;
+      t -= passInterval;
     }
+    // insert synthetic passes immediately after current event (keep chronological)
+    syntheticPasses.sort((a, b) => (b.triggerAt || 0) - (a.triggerAt || 0));
+    filled.push(...syntheticPasses);
   }
 
-  // handle shot.andOne by injecting freethrow events (unchanged from previous behavior)
+  // handle shot.andOne by injecting freethrow events
   const finalList = [];
   for (let i = 0; i < filled.length; i++) {
     const ev = filled[i];
     finalList.push(ev);
     if (ev.type === "shot" && ev.andOne && ev.shooter) {
-      // inject a freethrow immediately after the shot
       const ft = {
         type: "freethrow",
         shooter: ev.shooter,
-        made: ev.made || false,
+        made: !!ev.made,
         clock: ev.clock,
         triggerAt: ev.triggerAt,
         synthetic: true,
@@ -1388,7 +1332,6 @@ function preprocessInstructions(orig) {
     }
   }
 
-  // final sort to be safe
   finalList.sort((a, b) => (b.triggerAt || 0) - (a.triggerAt || 0));
   return finalList;
 }
