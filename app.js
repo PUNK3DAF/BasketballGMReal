@@ -440,22 +440,33 @@ function updatePhysics(dt) {
       } else {
         // random small idle moves to avoid standing still
         if (!p.move && p.idleTimer <= 0) {
-          const angle = Math.random() * Math.PI * 2;
-          const r = Math.random() * IDLE_MOVE_RADIUS * 0.6;
-          const nx = Math.max(
-            30,
-            Math.min(canvas.width - 30, p.x + Math.cos(angle) * r)
-          );
-          const ny = Math.max(
-            30,
-            Math.min(canvas.height - 30, p.y + Math.sin(angle) * r)
-          );
-          setMoveTween(
-            p,
-            nx,
-            ny,
-            Math.random() * (IDLE_MAX_DUR - IDLE_MIN_DUR) + IDLE_MIN_DUR
-          );
+          // 60% chance to perform a purposeful half-to-half drift, otherwise small wander
+          if (Math.random() < 0.6) {
+            const mid = canvas.width / 2;
+            // choose target on offensive-looking half half the time
+            const tgtX =
+              p.team === "home"
+                ? clamp(mid + 40 + Math.random() * 120, 40, canvas.width - 40)
+                : clamp(mid - 40 - Math.random() * 120, 40, canvas.width - 40);
+            const tgtY = clamp(
+              canvas.height * 0.25 + Math.random() * canvas.height * 0.5,
+              40,
+              canvas.height - 40
+            );
+            const dur = Math.random() * 1.2 + 0.6;
+            setMoveTween(p, tgtX, tgtY, dur);
+          } else {
+            const angle = Math.random() * Math.PI * 2;
+            const r = Math.random() * IDLE_MOVE_RADIUS * 0.9;
+            const nx = clamp(p.x + Math.cos(angle) * r, 40, canvas.width - 40);
+            const ny = clamp(p.y + Math.sin(angle) * r, 40, canvas.height - 40);
+            setMoveTween(
+              p,
+              nx,
+              ny,
+              Math.random() * (IDLE_MAX_DUR - IDLE_MIN_DUR) + IDLE_MIN_DUR
+            );
+          }
           p.idleTimer =
             Math.random() * (IDLE_MAX_DUR - IDLE_MIN_DUR) + IDLE_MIN_DUR;
         }
@@ -697,9 +708,13 @@ function finalizeSteal(thief, from) {
   game.ball.state = "held";
   game.ball.holder = thief;
   game.offense = thief.team;
+  // ensure team positions update immediately
+  setTeamAttackPositions(game.offense);
   game.ball.x = thief.x + (thief.team === "home" ? 10 : -10);
   game.ball.y = thief.y - 8;
   log(`${thief.name} stole the ball (instruction)`);
+  // reposition both teams proactively
+  setTeamAttackPositions(game.offense);
 }
 
 function finalizeBallArrival(pending) {
@@ -945,6 +960,11 @@ function applyInstruction(ev, opts = {}) {
           !shooter.move ||
           Math.hypot(shooter.tx - shootX, shooter.ty - shootY) > 12
         ) {
+          // before setMoveTween(...) compute:
+          const margin = 40;
+          const shootXClamped = clamp(shootX, margin, canvas.width - margin);
+          const shootYClamped = clamp(shootY, margin, canvas.height - margin);
+          // use shootXClamped/shootYClamped for setMoveTween and for computing ball.vx/vy
           setMoveTween(
             shooter,
             shootX,
@@ -1188,13 +1208,15 @@ function render() {
   }
 
   // HUD
+  const hudW = 360;
+  const hudX = Math.max(8, Math.floor(canvas.width / 2 - hudW / 2));
   ctx.fillStyle = "rgba(0,0,0,0.6)";
-  ctx.fillRect(10, 10, 360, 52);
+  ctx.fillRect(hudX, 10, hudW, 52);
   ctx.fillStyle = "#fff";
   ctx.font = "14px sans-serif";
   ctx.fillText(
     `${game.home.name} ${game.homeScore}  -  ${game.awayScore} ${game.away.name}`,
-    20,
+    hudX + 12,
     36
   );
   ctx.fillStyle = "#000";
@@ -1207,7 +1229,7 @@ function render() {
     `Q${game.period}  ${minutes}:${seconds}   Shot: ${Math.ceil(
       game.possessionTime || 0
     )}`,
-    canvas.width - 300,
+    hudX + hudW - 160,
     34
   );
 }
@@ -1254,6 +1276,28 @@ function drawCourt() {
   ctx.stroke();
   ctx.beginPath();
   ctx.arc(canvas.width / 2, canvas.height / 2, 50, 0, Math.PI * 2);
+  ctx.stroke();
+  // 3-point arcs (both ends)
+  ctx.strokeStyle = "#999";
+  ctx.lineWidth = 1.2;
+  const threeR = THREE_PT_DIST;
+  ctx.beginPath();
+  ctx.arc(
+    30,
+    canvas.height / 2,
+    threeR,
+    -Math.PI / 2 + 0.25,
+    Math.PI / 2 - 0.25
+  );
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(
+    canvas.width - 30,
+    canvas.height / 2,
+    threeR,
+    Math.PI / 2 + 0.25,
+    (3 * Math.PI) / 2 - 0.25
+  );
   ctx.stroke();
 }
 
@@ -1451,4 +1495,69 @@ function formatClock(sec) {
     .toString()
     .padStart(2, "0");
   return `${m}:${s}`;
+}
+
+// --- helpers: clamp + team positioning ---
+function clamp(v, a, b) {
+  return Math.max(a, Math.min(b, v));
+}
+
+function setTeamAttackPositions(offenseTeam) {
+  if (!game) return;
+  const centerY = canvas.height / 2;
+  const offsets = [-120, -40, 40, 120, 0];
+  const margin = 40;
+  const attackOffset = 120;
+  const guardOffset = 80;
+  game.players.forEach((p, idx) => {
+    let tx = p.tx,
+      ty = p.ty;
+    if (offenseTeam && p.team === offenseTeam) {
+      // offense: approach attacking side but clamp inside court
+      const oppX = getOpponentBasketX(p.team);
+      const dir = p.team === "home" ? -1 : 1;
+      tx = clamp(oppX + dir * -attackOffset, margin, canvas.width - margin);
+      ty = clamp(
+        centerY + offsets[idx % offsets.length] + idx * 6,
+        margin,
+        canvas.height - margin
+      );
+    } else if (offenseTeam) {
+      // defense: guard own basket area
+      const ownX = p.team === "home" ? 30 : canvas.width - 30;
+      tx = clamp(
+        ownX + (p.team === "home" ? guardOffset : -guardOffset),
+        margin,
+        canvas.width - margin
+      );
+      ty = clamp(
+        centerY + offsets[idx % offsets.length] + idx * -6,
+        margin,
+        canvas.height - margin
+      );
+    } else {
+      // no clear offense: mild halfcourt spread
+      tx = clamp(
+        canvas.width / 2 + (p.team === "home" ? -80 : 80),
+        margin,
+        canvas.width - margin
+      );
+      ty = clamp(
+        centerY + offsets[idx % offsets.length],
+        margin,
+        canvas.height - margin
+      );
+    }
+    // only reassign if meaningfully different to avoid jitter
+    if (Math.hypot((p.tx || p.x) - tx, (p.ty || p.y) - ty) > 10) {
+      const dx = tx - p.x,
+        dy = ty - p.y,
+        dist = Math.hypot(dx, dy);
+      const travel = Math.max(
+        0.25,
+        Math.min(1.2, dist / (PLAYER_BASE_SPEED * 1.6))
+      );
+      setMoveTween(p, tx, ty, travel);
+    }
+  });
 }
