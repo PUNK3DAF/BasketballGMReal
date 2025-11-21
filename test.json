@@ -1,0 +1,66 @@
+[
+  {
+    "type": "inbound",
+    "to": { "team": "home", "name": "Donovan" },
+    "clock": "10:00",
+    "duration": 0.6
+  },
+  {
+    "type": "pass",
+    "from": { "team": "home", "name": "Donovan" },
+    "to": { "team": "home", "name": "Kyrie" },
+    "clock": "9:50"
+  },
+  {
+    "type": "shot",
+    "shooter": { "team": "home", "name": "Durant" },
+    "made": false,
+    "points": 3,
+    "clock": "9:45"
+  },
+  { "type": "rebound", "team": "away", "name": "LeBron", "clock": "9:25" },
+  {
+    "type": "shot",
+    "shooter": { "team": "away", "name": "LeBron" },
+    "made": true,
+    "points": 2,
+    "assist": { "team": "away", "name": "AD" },
+    "clock": "8:59"
+  },
+  {
+    "type": "sub",
+    "team": "home",
+    "out": "Player1",
+    "in": "PlayerX",
+    "clock": "8:50"
+  },
+  {
+    "type": "steal",
+    "from": { "team": "home", "name": "Kyrie" },
+    "to": { "team": "away", "name": "LeBron" },
+    "clock": "8:40"
+  },
+  {
+    "type": "shot",
+    "shooter": { "team": "away", "name": "LeBron" },
+    "made": false,
+    "points": 2,
+    "rebound": { "team": "home", "name": "Durant" },
+    "andOne": true,
+    "clock": "8:30"
+  },
+  {
+    "type": "outOfBounds",
+    "x": 50,
+    "y": 50,
+    "awardedTo": { "team": "home", "name": "Kyrie" },
+    "clock": "8:15"
+  },
+  {
+    "type": "timeout",
+    "team": "home",
+    "handlerName": "Kyrie",
+    "clock": "7:50"
+  },
+  { "type": "setScore", "home": 10, "away": 12, "clock": "7:48" }
+]
