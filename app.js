@@ -1240,89 +1240,156 @@ drawCourt();
 
 // ----------------- Preprocessing / scheduling helpers -----------------
 
-// preprocess: parse clock -> triggerAt, remove auto-pass insertion, insert small move fillers only
+// preprocess: parse clock -> triggerAt, auto-insert passes (when possession known),
+// insert small move fillers only, and handle freethrow for and-ones.
 function preprocessInstructions(orig) {
   const list = orig.map((e) => ({ ...e }));
+  // parse clocks into triggerAt (seconds left)
   list.forEach((ev) => {
-    if (ev.clock !== undefined && ev.clock !== null)
+    if (ev.clock !== undefined) {
       ev.triggerAt = parseClock(ev.clock);
+    }
   });
 
   // sort descending (clock counts down)
-  list.sort((a, b) => {
-    const A = a.triggerAt !== undefined ? a.triggerAt : -99999;
-    const B = b.triggerAt !== undefined ? b.triggerAt : -99999;
-    return B - A;
-  });
+  list.sort((a, b) => (b.triggerAt || 0) - (a.triggerAt || 0));
 
-  // We will NOT auto-insert passes. We'll only insert small move fillers (no passes)
+  // helper to choose a teammate from roster (playersGlobal must be loaded)
+  function chooseTeammate(team, excludeName) {
+    if (!playersGlobal || !playersGlobal.length) {
+      // fallback generic name
+      return excludeName === "Player1" ? "Player2" : "Player1";
+    }
+    const pool = playersGlobal.filter((p) => p.team === team);
+    if (!pool.length) return excludeName || pool[0]?.name || "Player";
+    let pick = pool[Math.floor(Math.random() * pool.length)].name;
+    if (excludeName && pool.some((p) => p.name === excludeName)) {
+      // try to avoid returning the excluded name
+      const alt = pool.find((p) => p.name !== excludeName);
+      if (alt) pick = alt.name;
+    }
+    return pick;
+  }
+
   const filled = [];
+  let currentPossession = undefined;
+  let currentHolder = undefined;
+
+  // iterate through events in chronological order (descending triggerAt)
   for (let i = 0; i < list.length; i++) {
     const ev = list[i];
     filled.push(ev);
+
+    // update possession/holder immediately after this event
+    switch (ev.type) {
+      case "inbound":
+        currentPossession = ev.to && ev.to.team;
+        currentHolder = ev.to && ev.to.name;
+        break;
+      case "pass":
+        currentPossession = ev.from && ev.from.team;
+        currentHolder = ev.to && ev.to.name;
+        break;
+      case "rebound":
+        currentPossession = ev.team;
+        currentHolder = ev.name;
+        break;
+      case "steal":
+        currentPossession = ev.to && ev.to.team;
+        currentHolder = ev.to && ev.to.name;
+        break;
+      case "outOfBounds":
+        if (ev.awardedTo) {
+          currentPossession = ev.awardedTo.team;
+          currentHolder = ev.awardedTo.name;
+        }
+        break;
+      case "shot":
+        // if made, possession turns to opponent and no immediate holder
+        if (ev.made) {
+          currentPossession = currentPossession === "home" ? "away" : "home";
+          currentHolder = null;
+        } else {
+          // missed shot: leave possession as-is; if a rebound event follows it will update
+          currentHolder = null;
+        }
+        break;
+      case "freethrow":
+        // freethrow shooter holds ball for the attempt
+        if (ev.shooter) {
+          currentPossession = ev.shooter.team;
+          currentHolder = ev.shooter.name;
+        }
+        break;
+      case "timeout":
+      case "sub":
+      case "setScore":
+        // do not change possession by default
+        break;
+      default:
+        break;
+    }
+
+    // compute gap to next event (we'll insert passes after 'ev' and before nextEvent)
     const next = list[i + 1];
-    if (!next || ev.triggerAt === undefined || next.triggerAt === undefined)
-      continue;
-    const gap = ev.triggerAt - next.triggerAt;
-    if (gap > 0.9) {
-      // create move for next primary actor to make the animation morph
-      let actor = null;
-      if (next.type === "shot" && next.shooter) actor = next.shooter;
-      else if (next.type === "inbound" && next.to) actor = next.to;
-      else if (next.type === "rebound" && next.name)
-        actor = { team: next.team, name: next.name };
-      if (actor) {
-        filled.push({
-          type: "move",
-          team: actor.team,
-          name: actor.name,
-          duration: Math.min(1.0, gap * 0.45),
-          generated: true,
-          triggerAt: next.triggerAt + gap * 0.5,
-        });
-      }
-      // If long gap after rebound (>24s) and next is shot by same team, insert sideline inbound
-      if (
-        ev.type === "rebound" &&
-        next.type === "shot" &&
-        ev.team === next.shooter.team &&
-        gap > 24
-      ) {
-        const inboundTime = Math.min(ev.triggerAt - 0.1, next.triggerAt + 0.4);
-        filled.push({
-          type: "inbound",
-          to: { team: next.shooter.team, name: next.shooter.name },
-          duration: 0.6,
-          generated: true,
-          reason: "sideline",
-          triggerAt: inboundTime,
-        });
-      }
+    if (!next || currentPossession === undefined) continue;
+    if (ev.type === "pass") continue; // don't create extra passes immediately after an explicit pass
+
+    const tStart = ev.triggerAt || 0;
+    const tEnd = next.triggerAt !== undefined ? next.triggerAt : 0;
+    let gap = tStart - tEnd;
+    // only insert passes when there's a meaningful gap
+    if (gap <= 0.5) continue;
+
+    const passInterval = 1.2; // seconds between synthetic passes
+    // start inserting at t = tStart - passInterval, then tStart - 2*passInterval, ...
+    const passTimes = [];
+    let t = tStart - passInterval;
+    while (t > tEnd + 0.1) {
+      passTimes.push(t);
+      t -= passInterval;
+      // safety limit
+      if (passTimes.length > 10) break;
+    }
+    // insert passes in chronological order (descending triggerAt), i.e., immediately after current ev
+    for (let pt of passTimes) {
+      const fromName = currentHolder || chooseTeammate(currentPossession);
+      const toName = chooseTeammate(currentPossession, fromName);
+      const passEv = {
+        type: "pass",
+        from: { team: currentPossession, name: fromName },
+        to: { team: currentPossession, name: toName },
+        clock: formatClock(pt),
+        triggerAt: pt,
+        synthetic: true,
+      };
+      filled.push(passEv);
+      // update holder so next synthetic pass goes from the receiver
+      currentHolder = toName;
     }
   }
 
-  // handle shot.andOne by injecting freethrow (unchanged)
+  // handle shot.andOne by injecting freethrow events (unchanged from previous behavior)
   const finalList = [];
   for (let i = 0; i < filled.length; i++) {
     const ev = filled[i];
     finalList.push(ev);
-    if (ev.type === "shot" && ev.andOne) {
-      finalList.push({
+    if (ev.type === "shot" && ev.andOne && ev.shooter) {
+      // inject a freethrow immediately after the shot
+      const ft = {
         type: "freethrow",
         shooter: ev.shooter,
-        made: ev.ftMade !== undefined ? ev.ftMade : true,
-        generated: true,
-        triggerAt: ev.triggerAt !== undefined ? ev.triggerAt - 0.2 : undefined,
-      });
+        made: ev.made || false,
+        clock: ev.clock,
+        triggerAt: ev.triggerAt,
+        synthetic: true,
+      };
+      finalList.push(ft);
     }
   }
 
-  finalList.sort((a, b) => {
-    const A = a.triggerAt !== undefined ? a.triggerAt : -99999;
-    const B = b.triggerAt !== undefined ? b.triggerAt : -99999;
-    return B - A;
-  });
-
+  // final sort to be safe
+  finalList.sort((a, b) => (b.triggerAt || 0) - (a.triggerAt || 0));
   return finalList;
 }
 
