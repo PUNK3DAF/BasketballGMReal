@@ -7,9 +7,22 @@
   </head>
   <body>
     <div id="ui">
-      <label
-        >Load `league.json`: <input type="file" id="fileInput" accept=".json"
-      /></label>
+      <div>
+        <label
+          >Load `league.json`: <input type="file" id="fileInput" accept=".json"
+        /></label>
+      </div>
+
+      <div>
+        <label
+          >Mode:
+          <select id="modeSelect">
+            <option value="simulate">Simulate (auto)</option>
+            <option value="replay">Instruction Replay</option>
+          </select>
+        </label>
+      </div>
+
       <div id="teamSelectors" style="display: none">
         <label
           >Home:
@@ -32,6 +45,24 @@
             value="1"
         /></label>
       </div>
+
+      <hr />
+
+      <div id="instructionsUI">
+        <label
+          >Load Instructions (.json):
+          <input type="file" id="instrFile" accept=".json"
+        /></label>
+        <button id="loadInstrBtn">Load</button>
+        <button id="playInstrBtn">Play</button>
+        <button id="pauseInstrBtn">Pause</button>
+        <button id="prevInstrBtn">Prev</button>
+        <button id="nextInstrBtn">Next</button>
+        <label
+          >AutoDelay (ms): <input id="instrDelay" type="number" value="800"
+        /></label>
+      </div>
+
       <div id="scoreboard">
         <span id="homeLabel">Home</span>
         <span id="homeScore">0</span>
