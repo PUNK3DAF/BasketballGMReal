@@ -237,18 +237,19 @@ modeSelect.addEventListener("change", () => {
 
 function log(msg) {
   if (!logEl) return;
-  // simple dedupe + cap
   log._last = log._last || { text: null, count: 0 };
   log._max = log._max || 200;
+  const MAX_DISPLAY_REPEAT = 20;
 
   if (msg === log._last.text) {
-    log._last.count++;
-    // update the most recent DOM entry (first child)
+    log._last.count = (log._last.count || 0) + 1;
     const first = logEl.firstChild;
-    if (first)
+    if (!first) return;
+    if (log._last.count <= MAX_DISPLAY_REPEAT) {
       first.textContent = `${log._last.text} (x${log._last.count + 1})`;
-    // stop adding after many repeats
-    if (log._last.count > 20) return;
+    } else if (log._last.count === MAX_DISPLAY_REPEAT + 1) {
+      first.textContent = `${log._last.text} (x${MAX_DISPLAY_REPEAT}+)`;
+    }
     return;
   }
 
@@ -860,6 +861,7 @@ function finalizeSteal(thief, from) {
 
 function finalizeBallArrival(pending) {
   if (!pending) return;
+
   if (pending.type === "pass") {
     const pTo = pending.to;
     if (pTo) {
@@ -867,32 +869,53 @@ function finalizeBallArrival(pending) {
       game.ball.holder = pTo;
       game.ball.x = pTo.x + (pTo.team === "home" ? 10 : -10);
       game.ball.y = pTo.y - 8;
-    } else game.ball.state = "ground";
-  } else if (pending.type === "inbound") {
+    } else {
+      game.ball.state = "ground";
+      game.ball.holder = null;
+    }
+    return;
+  }
+
+  if (pending.type === "inbound") {
     const handler = pending.handler;
     if (handler) {
       game.ball.state = "held";
       game.ball.holder = handler;
       game.ball.x = handler.x + (handler.team === "home" ? 10 : -10);
       game.ball.y = handler.y - 8;
+    } else {
+      game.ball.state = "ground";
+      game.ball.holder = null;
     }
-  } else if (pending.type === "shot") {
+    return;
+  }
+
+  if (pending.type === "shot") {
     const shooter = pending.shooter;
+    if (!shooter) return;
     if (pending.made) {
-      if (shooter.team === "home") game.homeScore += pending.points || 2;
-      else game.awayScore += pending.points || 2;
-      document.getElementById("homeScore").textContent = game.homeScore;
-      document.getElementById("awayScore").textContent = game.awayScore;
-      log(`${shooter.name} scored ${pending.points || 2} (instruction)`);
+      const pts = pending.points || 2;
+      if (shooter.team === "home") game.homeScore += pts;
+      else game.awayScore += pts;
+      const hs = document.getElementById("homeScore");
+      const as = document.getElementById("awayScore");
+      if (hs) hs.textContent = game.homeScore;
+      if (as) as.textContent = game.awayScore;
+      log(`${shooter.name} scored ${pts}`);
       if (pending.andOne) {
         performFreeThrow(
           shooter,
-          pending.ftMade !== undefined ? !!pending.ftMade : true
+          pending.ftMade !== undefined ? !!pending.ftMade : true,
+          { next: pending.next, rebound: pending.rebound }
         );
         return;
-      } else setInboundAfterScore();
+      } else {
+        setInboundAfterScore();
+        return;
+      }
     } else {
-      log(`${shooter.name} missed (instruction)`);
+      // missed
+      log(`${shooter.name} missed`);
       if (pending.rebound) {
         const r = pending.rebound;
         const rb = findPlayer(r.team, r.name);
@@ -902,20 +925,36 @@ function finalizeBallArrival(pending) {
           game.offense = rb.team;
           game.ball.x = rb.x + (rb.team === "home" ? 10 : -10);
           game.ball.y = rb.y - 8;
-        } else game.ball.state = "ground";
-      } else game.ball.state = "ground";
+          return;
+        }
+      }
+      // no rebound specified or rebound player not found
+      game.ball.state = "ground";
+      game.ball.holder = null;
+      return;
     }
-  } else if (pending.type === "freethrow") {
+  }
+
+  if (pending.type === "freethrow") {
     const shooter = pending.shooter;
-    if (pending.made) {
-      if (shooter.team === "home") game.homeScore += 1;
-      else game.awayScore += 1;
-      document.getElementById("homeScore").textContent = game.homeScore;
-      document.getElementById("awayScore").textContent = game.awayScore;
-      log(`${shooter.name} made a free throw`);
-    } else log(`${shooter.name} missed a free throw`);
+    if (shooter) {
+      if (pending.made) {
+        if (shooter.team === "home") game.homeScore += 1;
+        else game.awayScore += 1;
+        const hs = document.getElementById("homeScore");
+        const as = document.getElementById("awayScore");
+        if (hs) hs.textContent = game.homeScore;
+        if (as) as.textContent = game.awayScore;
+        log(`${shooter.name} made a free throw`);
+      } else {
+        log(`${shooter.name} missed a free throw`);
+      }
+    }
     if (pending.next) {
-      performFreeThrow(pending.shooter, pending.next.made, pending.next);
+      performFreeThrow(pending.shooter, pending.next.made, {
+        next: pending.next.next,
+        rebound: pending.next.rebound,
+      });
     } else {
       if (pending.rebound) {
         const r = pending.rebound;
@@ -928,11 +967,14 @@ function finalizeBallArrival(pending) {
           game.ball.y = rb.y - 8;
         } else {
           game.ball.state = "ground";
+          game.ball.holder = null;
         }
       } else {
         game.ball.state = "ground";
+        game.ball.holder = null;
       }
     }
+    return;
   }
 }
 
@@ -975,7 +1017,6 @@ function setInboundAfterScore() {
 function applyInstruction(ev, opts = {}) {
   if (!game || !ev) return;
 
-  // Only write a concise, user-facing log for important events.
   function note(s) {
     if (!opts.silent) log(s);
     logDebug(`instr:${ev.type} -> ${s}`);
@@ -1085,6 +1126,7 @@ function applyInstruction(ev, opts = {}) {
     }
 
     case "shot": {
+      // Do NOT log "shooter shoots" here to avoid duplicate/repeated UI messages.
       const shooter = findPlayer(ev.shooter.team, ev.shooter.name);
       if (shooter) {
         const midX = canvas.width / 2;
@@ -1132,27 +1174,26 @@ function applyInstruction(ev, opts = {}) {
           points: ev.points,
           assist: ev.assist,
           andOne: !!ev.andOne,
+          rebound: ev.rebound,
+          ftMade: ev.ftMade,
         };
         game.ball.holder = null;
-        note(
-          `${shooter.name} shoots (${ev.points}) ${ev.made ? "made" : "missed"}`
-        );
+        // no immediate UI note here; outcome logged in finalizeBallArrival
         setTeamAttackPositions(game.offense);
       } else {
-        note("Shot: shooter not found");
+        logDebug("Shot: shooter not found");
       }
       break;
     }
 
     case "freethrow": {
       const shooter = findPlayer(ev.shooter.team, ev.shooter.name);
-      if (shooter) {
+      if (shooter)
         performFreeThrow(shooter, !!ev.made, {
           next: ev.next,
           rebound: ev.rebound,
         });
-        note(`FT: ${shooter.name} ${ev.made ? "made" : "missed"}`);
-      }
+      note(`Free throw queued`);
       break;
     }
 
@@ -1294,7 +1335,6 @@ function applyInstruction(ev, opts = {}) {
     }
 
     case "offensiveFoul":
-      // intentionally ignored in visualizer
       note("Offensive foul (ignored)");
       break;
 
@@ -1306,12 +1346,11 @@ function applyInstruction(ev, opts = {}) {
       if (hs) hs.textContent = game.homeScore;
       if (as) as.textContent = game.awayScore;
       note(
-        `Score: ${game.home.name} ${game.homeScore} - ${game.awayScore} ${game.away.name}`
+        `Score set: ${game.home.name} ${game.homeScore} - ${game.awayScore} ${game.away.name}`
       );
       break;
 
     default:
-      // unknown instruction: keep silent in UI, but debug-print if enabled
       logDebug(`Unknown instruction: ${JSON.stringify(ev)}`);
   }
 
